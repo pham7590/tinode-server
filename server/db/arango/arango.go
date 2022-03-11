@@ -1261,7 +1261,7 @@ func (a *adapter) UsersForTopic(topic string, keepDeleted bool, opts *t.QueryOpt
 		}
 	}
 
-	cur, err := a.QueryManyf(``, nil)
+	cur, err := a.QueryManyf(``)
 	if err != nil {
 		return nil, err
 	}
