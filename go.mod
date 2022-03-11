@@ -4,10 +4,10 @@ go 1.16
 
 require (
 	firebase.google.com/go v3.12.0+incompatible
+	github.com/arangodb/go-driver v1.2.1
 	github.com/aws/aws-sdk-go v1.29.29
 	github.com/go-sql-driver/mysql v1.5.0
 	github.com/golang/mock v1.2.0
-	github.com/golang/protobuf v1.5.2 // indirect
 	github.com/google/go-cmp v0.5.5
 	github.com/gorilla/handlers v1.4.2
 	github.com/gorilla/websocket v1.4.2
@@ -17,6 +17,8 @@ require (
 	github.com/prometheus/common v0.9.1
 	github.com/tinode/jsonco v1.0.0
 	github.com/tinode/snowflake v1.0.0
+	gitlab.com/gfxlabs/goutil v1.5.0
+	gitlab.com/gfxlabs/structs v1.3.0
 	go.mongodb.org/mongo-driver v1.7.0
 	golang.org/x/crypto v0.0.0-20200622213623-75b288015ac9
 	golang.org/x/net v0.0.0-20220127200216-cd36cc0744dd

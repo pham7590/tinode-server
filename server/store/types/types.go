@@ -347,10 +347,11 @@ func P2PNameForUser(uid Uid, p2p string) (string, error) {
 type ObjHeader struct {
 	// using string to get around rethinkdb's problems with uint64;
 	// `bson:"_id"` tag is for mongodb to use as primary key '_id'.
-	Id        string `bson:"_id"`
+	// `json:"_key` tag is for arangodb to use as primary key '_key'
+	Id        string `bson:"_id" json:"_key"`
 	id        Uid
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	CreatedAt time.Time `json:",omitempty"`
+	UpdatedAt time.Time `json:",omitempty"`
 }
 
 // Uid assigns Uid header field.
@@ -493,7 +494,7 @@ func (os ObjState) Value() (driver.Value, error) {
 
 // User is a representation of a DB-stored user record.
 type User struct {
-	ObjHeader `bson:",inline"`
+	ObjHeader `bson:",inline" json:",inline"`
 
 	State   ObjState
 	StateAt *time.Time `json:"StateAt,omitempty" bson:",omitempty"`
@@ -854,7 +855,7 @@ func (da DefaultAccess) Value() (driver.Value, error) {
 
 // Credential hold data needed to validate and check validity of a credential like email or phone.
 type Credential struct {
-	ObjHeader `bson:",inline"`
+	ObjHeader `bson:",inline" json:",inline"`
 	// Credential owner
 	User string
 	// Verification method (email, tel, captcha, etc)
@@ -879,12 +880,12 @@ type LastSeenUA struct {
 
 // Subscription to a topic
 type Subscription struct {
-	ObjHeader `bson:",inline"`
+	ObjHeader `bson:",inline" json:",inline"`
 	// User who has relationship with the topic
 	User string
 	// Topic subscribed to
 	Topic     string
-	DeletedAt *time.Time `bson:",omitempty"`
+	DeletedAt *time.Time `bson:",omitempty" json:",omitempty"`
 
 	// Values persisted through subscription soft-deletion
 
@@ -1050,14 +1051,14 @@ type perUserData struct {
 
 // Topic stored in database. Topic's name is Id
 type Topic struct {
-	ObjHeader `bson:",inline"`
+	ObjHeader `bson:",inline" json:",inline"`
 
 	// State of the topic: normal (ok), suspended, deleted
 	State   ObjState
 	StateAt *time.Time `json:"StateAt,omitempty" bson:",omitempty"`
 
 	// Timestamp when the last message has passed through the topic
-	TouchedAt time.Time
+	TouchedAt time.Time `json:",omitempty"`
 
 	// Use bearer token or use ACL
 	UseBt bool
@@ -1163,7 +1164,7 @@ func (mh MessageHeaders) Value() (driver.Value, error) {
 
 // Message is a stored {data} message
 type Message struct {
-	ObjHeader `bson:",inline"`
+	ObjHeader `bson:",inline" json:",inline"`
 	DeletedAt *time.Time `json:"DeletedAt,omitempty" bson:",omitempty"`
 
 	// ID of the hard-delete operation
@@ -1241,7 +1242,7 @@ func (rs RangeSorter) Normalize() RangeSorter {
 
 // DelMessage is a log entry of a deleted message range.
 type DelMessage struct {
-	ObjHeader   `bson:",inline"`
+	ObjHeader   `bson:",inline" json:",inline"`
 	Topic       string
 	DeletedFor  string
 	DelId       int
@@ -1322,7 +1323,7 @@ const (
 
 // FileDef is a stored record of a file upload
 type FileDef struct {
-	ObjHeader `bson:",inline"`
+	ObjHeader `bson:",inline" json:",inline"`
 	// Status of upload
 	Status int
 	// User who created the file

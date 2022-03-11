@@ -1,0 +1,12 @@
+LICENSE
+README.md
+setup.py
+tinode_grpc/GIT_VERSION
+tinode_grpc/__init__.py
+tinode_grpc/model_pb2.py
+tinode_grpc/model_pb2_grpc.py
+tinode_grpc.egg-info/PKG-INFO
+tinode_grpc.egg-info/SOURCES.txt
+tinode_grpc.egg-info/dependency_links.txt
+tinode_grpc.egg-info/requires.txt
+tinode_grpc.egg-info/top_level.txt
