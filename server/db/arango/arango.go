@@ -529,7 +529,7 @@ func (a *adapter) UserCreate(usr *t.User) error {
 // UserGet fetches a single user by user id. If user is not found it returns (nil, nil)
 func (a *adapter) UserGet(id t.Uid) (*t.User, error) {
 	var user t.User
-	if _, err := a.collections.users.ReadDocument(a.ctx, user.Id, &user); err != nil {
+	if _, err := a.collections.users.ReadDocument(a.ctx, id.String(), &user); err != nil {
 		return nil, err
 	}
 	return &user, nil
@@ -541,9 +541,8 @@ func (a *adapter) UserGetAll(ids ...t.Uid) ([]t.User, error) {
 	for i, id := range ids {
 		uids[i] = id.String()
 	}
-
-	var users []t.User
-	_, _, err := a.collections.users.ReadDocuments(a.ctx, uids, &users)
+	users := make([]t.User, len(uids))
+	_, _, err := a.collections.users.ReadDocuments(a.ctx, uids, users)
 	if err != nil {
 		return nil, err
 	}
@@ -686,7 +685,7 @@ func (a *adapter) UserUpdateTags(uid t.Uid, add, remove, reset []string) ([]stri
 			"	for g in users"+
 			"	filter g._key == '%s'"+
 			"	let base = is_array(g.tags) ? (append(g.tags, %s, true)) : ([%s])"+
-			"	update g with {friends: base} in gamer"+
+			"	update g with {tags: base} in users"+
 			"	return base", nil, uid.String(), v, v)
 		if err != nil {
 			return nil, err
@@ -697,7 +696,7 @@ func (a *adapter) UserUpdateTags(uid t.Uid, add, remove, reset []string) ([]stri
 			"	for g in users"+
 			"	filter g._key == '%s'"+
 			"	let base = is_array(g.tags) ? (remove_values(g.tags, %s)) : ([])"+
-			"	update g with {friends: base} in gamer"+
+			"	update g with {tags: base} in users"+
 			"	return base", nil, uid.String(), v)
 		if err != nil {
 			return nil, err
@@ -732,8 +731,16 @@ func (a *adapter) UserGetByCred(method, value string) (t.Uid, error) {
 // TODO: UserUnreadCount returns the total number of unread messages in all topics with
 // the R permission.
 func (a *adapter) UserUnreadCount(uid t.Uid) (int, error) {
-
-	return 0, nil
+	querystring := `for d in subscriptions
+	for t in topics
+	filter d.User == "%s" && t._key == d.Topic
+	filter t.State != "%d" && (d.DeletedAt == "" || d.DeletedAt == null)
+	collect aggregate seqId = Max(t.SeqId), readSeqId = Min(d.ReadSeqId) 
+	return seqId - readSeqId
+	`
+	var ans int
+	err := a.QueryOnef(querystring, &ans, uid.String(), t.StateDeleted)
+	return ans, err
 }
 
 // Credential management
@@ -899,24 +906,26 @@ func (a *adapter) CredFail(uid t.Uid, method string) error {
 // Todo: AuthGetUniqueRecord returns authentication record for a given unique value i.e. login.
 func (a *adapter) AuthGetUniqueRecord(unique string) (t.Uid, auth.Level, []byte, time.Time, error) {
 	var record struct {
-		UserId  string
-		AuthLvl auth.Level
-		Secret  []byte
-		Expires time.Time
+		UserId  string     `json:"userid"`
+		AuthLvl auth.Level `json:"authlvl"`
+		Secret  []byte     `json:"secret"`
+		Expires time.Time  `json:"expires"`
 	}
-	return t.ParseUid(record.UserId), record.AuthLvl, record.Secret, record.Expires, nil
+	_, err := a.collections.auth.ReadDocument(a.ctx, unique, &record)
+	return t.ParseUid(record.UserId), record.AuthLvl, record.Secret, record.Expires, err
 }
 
 // AuthGetRecord returns authentication record given user ID and method.
 func (a *adapter) AuthGetRecord(uid t.Uid, scheme string) (string, auth.Level, []byte, time.Time, error) {
 	var record struct {
-		Id      string `bson:"_key"`
-		AuthLvl auth.Level
-		Secret  []byte
-		Expires time.Time
+		Id      string     `bson:"_key"`
+		UserId  string     `json:"userid"`
+		AuthLvl auth.Level `json:"authlvl"`
+		Secret  []byte     `json:"secret"`
+		Expires time.Time  `json:"expires"`
 	}
 	if err := a.QueryOnef(`for d in auth
-	filter d.UserId == "%s" && d.Scheme == %s
+	filter d.userid == "%s" && d.scheme == "%s"
 	return d`, &record, uid.String(), scheme); err != nil {
 		return "", 0, nil, time.Time{}, err
 	}
@@ -1478,11 +1487,18 @@ func (a *adapter) topicUpdate(topic string, update map[string]interface{}) error
 // SubscriptionGet reads a subscription of a user to a topic.
 func (a *adapter) SubscriptionGet(topic string, user t.Uid, keepDeleted bool) (*t.Subscription, error) {
 	sub := new(t.Subscription)
+	query := ` for d in subscriptions
+	filter d._key == "%s"`
 	filter := topic + ":" + user.String()
 	if !keepDeleted {
+		query = query + " && (d.DeletedAt == null || d.DeletedAt == \"\")"
 	}
-	err := a.QueryOnef(filter, sub)
+	query = query + "\n return d"
+	err := a.QueryOnef(query, sub, filter)
 	if err != nil {
+		if driver.IsNoMoreDocuments(err) {
+			return nil, nil
+		}
 		return nil, err
 	}
 

@@ -16,6 +16,9 @@ func (a *adapter) QueryOnef(
 		return errors.New("adapter arangodb not connected")
 	}
 	formatted := fmt.Sprintf(queryString, args...)
+	//log.Println("##############")
+	//log.Println(formatted)
+	//log.Println("##############")
 	cursor, err := a.db.Query(a.ctx,
 		formatted,
 		nil,

@@ -896,7 +896,7 @@ func TestMessageAttachments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got map[string]string
+	var got map[string]interface{}
 	_, err = db.messages.ReadDocument(ctx, msgs[1].Id, &got)
 	if err != nil {
 		t.Fatal(err)
@@ -904,7 +904,7 @@ func TestMessageAttachments(t *testing.T) {
 	if !reflect.DeepEqual(got["attachments"], fids) {
 		t.Error(mismatchErrorString("Attachments", got["attachments"], fids))
 	}
-	var got2 map[string]int
+	var got2 map[string]interface{}
 	_, err = db.fileuploads.ReadDocument(ctx, files[0].Id, &got2)
 	if err != nil {
 		t.Fatal(err)
