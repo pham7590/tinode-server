@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	driver "github.com/arangodb/go-driver"
+	t "github.com/tinode/chat/server/store/types"
 )
 
 func (a *adapter) QueryOnef(
@@ -27,9 +28,16 @@ func (a *adapter) QueryOnef(
 		return err
 	}
 	defer cursor.Close()
-	_, err = cursor.ReadDocument(a.ctx, answer)
-	if err != nil {
-		return err
+	if answer == nil {
+		return nil
+	}
+	if !cursor.HasMore() {
+		return t.ErrNotFound
+	} else {
+		_, err = cursor.ReadDocument(a.ctx, answer)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -85,7 +85,6 @@ type configType struct {
 
 // Open initializes arangodb session
 func (a *adapter) Open(jsonconfig json.RawMessage) error {
-
 	if a.conn != nil {
 		return errors.New("adapter arangodb is already connected")
 	}
@@ -362,7 +361,7 @@ func (a *adapter) CreateDb(reset bool) error {
 		switch v {
 		case "users":
 			a.collections.users = coll
-			persistent = append(persistent, "tags[*]", "deletedat")
+			persistent = append(persistent, "Tags[*]", "DeletedAt")
 			_, _, err = coll.EnsurePersistentIndex(a.ctx,
 				[]string{"deviceids[*]"},
 				&driver.EnsurePersistentIndexOptions{
@@ -379,15 +378,15 @@ func (a *adapter) CreateDb(reset bool) error {
 			persistent = append(persistent, "userid")
 		case "topics":
 			a.collections.topics = coll
-			persistent = append(persistent, "owner", "tags[*]")
+			persistent = append(persistent, "Owner", "Tags[*]")
 		case "subscriptions":
 			a.collections.subscriptions = coll
-			persistent = append(persistent, "user", "topic")
+			persistent = append(persistent, "User", "Topic", "ModeWant", "ModeGiven")
 		case "messages":
 			a.collections.messages = coll
-			persistent = append(persistent, "seqid", "from", "createdat")
+			persistent = append(persistent, "SeqId", "From", "CreatedAt")
 			_, _, err = coll.EnsurePersistentIndex(a.ctx,
-				[]string{"topic", "seqid"},
+				[]string{"Topic", "SeqId"},
 				&driver.EnsurePersistentIndexOptions{
 					InBackground: true,
 					Name:         "IDX_" + "topic_seqid",
@@ -396,7 +395,7 @@ func (a *adapter) CreateDb(reset bool) error {
 			if err != nil {
 				return err
 			}
-			persistent = append(persistent, "topic", "delid")
+			persistent = append(persistent, "Topic", "DelId")
 			_, _, err = coll.EnsurePersistentIndex(a.ctx,
 				[]string{"topic", "delid"},
 				&driver.EnsurePersistentIndexOptions{
@@ -409,9 +408,9 @@ func (a *adapter) CreateDb(reset bool) error {
 			}
 		case "dellog":
 			a.collections.dellog = coll
-			persistent = append(persistent, "topic", "delid")
+			persistent = append(persistent, "Topic", "DelId")
 			_, _, err = coll.EnsurePersistentIndex(a.ctx,
-				[]string{"topic", "delid"},
+				[]string{"Topic", "DelId"},
 				&driver.EnsurePersistentIndexOptions{
 					InBackground: true,
 					Name:         "IDX_" + "topic_delid",
@@ -422,10 +421,10 @@ func (a *adapter) CreateDb(reset bool) error {
 			}
 		case "credentials":
 			a.collections.credentials = coll
-			persistent = append(persistent, "user")
+			persistent = append(persistent, "User")
 		case "fileuploads":
 			a.collections.fileuploads = coll
-			persistent = append(persistent, "user", "usecount")
+			persistent = append(persistent, "User", "UseCount")
 		case "kvmeta":
 			a.collections.kvmeta = coll
 			_, err := coll.CreateDocument(a.ctx, map[string]interface{}{"_key": "version", "value": adpVersion})
@@ -499,13 +498,13 @@ func (a *adapter) updateDbVersion(v int) error {
 
 // Create system topic 'sys'.
 func createSystemTopic(a *adapter) error {
-	now := t.TimeNow()
+	nowt := t.TimeNow()
 	topicmap := structs.Map(&t.Topic{
 		ObjHeader: t.ObjHeader{
 			Id:        "sys",
-			CreatedAt: now,
-			UpdatedAt: now},
-		TouchedAt: now,
+			CreatedAt: nowt,
+			UpdatedAt: nowt},
+		TouchedAt: nowt,
 		Access:    t.DefaultAccess{Auth: t.ModeNone, Anon: t.ModeNone},
 		Public:    map[string]interface{}{"fn": "System"},
 	})
@@ -570,13 +569,15 @@ func (a *adapter) UserDelete(uid t.Uid, hard bool) error {
 		topicStrings[i] = t2.Id
 
 	}
-	tid, err := a.db.BeginTransaction(a.ctx, driver.TransactionCollections{
-		Exclusive: []string{"dellog", "messages", "subscriptions", "topics"},
-	}, &driver.BeginTransactionOptions{})
-	if err != nil {
-		return err
+	if a.useTransactions {
+		tid, err := a.db.BeginTransaction(a.ctx, driver.TransactionCollections{
+			Write: []string{"dellog", "messages", "subscriptions", "topics"},
+		}, &driver.BeginTransactionOptions{LockTimeout: 10 * time.Second})
+		if err != nil {
+			return err
+		}
+		defer a.db.CommitTransaction(a.ctx, tid, nil)
 	}
-	defer a.db.CommitTransaction(a.ctx, tid, nil)
 	if hard {
 		// 1. Delete dellog
 		// TODO: 2. Decrement fileuploads.
@@ -586,26 +587,26 @@ func (a *adapter) UserDelete(uid t.Uid, hard bool) error {
 		for _, topic := range topics {
 			if err = a.QueryOnef(`for d in dellog
 			filter d.Topic == "%s"
-			remove d._key in dellog
-			`, topic.Id); err != nil {
+			remove d in dellog
+			`, nil, topic.Id); err != nil {
 				return err
 			}
 			if err = a.QueryOnef(`for d in subscriptions
 			filter d.Topic == "%s"
-			remove d._key in subscriptions
-			`, topic.Id); err != nil {
+			remove d in subscriptions
+			`, nil, topic.Id); err != nil {
 				return err
 			}
 			if err = a.QueryOnef(`for d in messages
 			filter d.Topic == "%s"
-			remove d._key in messages
-			`, topic.Id); err != nil {
+			remove d in messages
+			`, nil, topic.Id); err != nil {
 				return err
 			}
 			if err = a.QueryOnef(`for d in topics
 			filter d._key == "%s"
-			remove d._key in topics
-			`, topic.Id); err != nil {
+			remove d in topics
+			`, nil, topic.Id); err != nil {
 				return err
 			}
 		}
@@ -617,24 +618,24 @@ func (a *adapter) UserDelete(uid t.Uid, hard bool) error {
 		// Delete user's subscriptions in all topics.
 		if err = a.QueryOnef(`for d in subscriptions
 			filter d.User == "%s"
-			remove d._key in subscriptions`,
-			uid.String()); err != nil {
+			remove d in subscriptions
+			`, nil, uid.String()); err != nil {
 			return err
 		}
 
 		// Delete user's authentication records.
 		if err = a.QueryOnef(`for d in auth
 			filter d.UserId == "%s"
-			remove d._key in auth`,
-			uid.String()); err != nil {
+			remove d in auth
+			`, nil, uid.String()); err != nil {
 			return err
 		}
 
 		// Delete credentials.
 		if err = a.QueryOnef(`for d in credentials
 			filter d.User == "%s"
-			remove d._key in credentials`,
-			uid.String()); err != nil {
+			remove d in credentials 
+			`, nil, uid.String()); err != nil {
 			return err
 		}
 
@@ -643,15 +644,15 @@ func (a *adapter) UserDelete(uid t.Uid, hard bool) error {
 		// And finally delete the user.
 		if err = a.QueryOnef(`for d in users
 			filter d._key == "%s"
-			remove d._key in users`,
-			uid.String()); err != nil {
+			remove d in users
+			`, nil, uid.String()); err != nil {
 			return err
 		}
 	} else {
 		if err = a.QueryOnef(`for d in subscriptions
 			filter d.User == "%s"
-			remove d._key in subscriptions`,
-			uid.String()); err != nil {
+			remove d in subscriptions
+			`, nil, uid.String()); err != nil {
 			return err
 		}
 
@@ -678,15 +679,16 @@ func (a *adapter) UserUpdateTags(uid t.Uid, add, remove, reset []string) ([]stri
 	// Compare to nil vs checking for zero length: zero length reset is valid.
 	if reset != nil {
 		// Replace Tags with the new value
-		return reset, a.UserUpdate(uid, map[string]interface{}{"tags": reset})
+		return reset, a.UserUpdate(uid, map[string]interface{}{"Tags": reset})
 	}
+	out := []string{}
 	for _, v := range add {
 		err := a.QueryOnef(""+
 			"	for g in users"+
-			"	filter g._key == '%s'"+
-			"	let base = is_array(g.tags) ? (append(g.tags, %s, true)) : ([%s])"+
-			"	update g with {tags: base} in users"+
-			"	return base", nil, uid.String(), v, v)
+			`	filter g._key == "%s"`+
+			`	let base = is_array(g.Tags) ? (unique(append(g.Tags, "%s", true))) : (["%s"])`+
+			"	update g with {Tags: base} in users"+
+			"	return base", &out, uid.String(), v, v)
 		if err != nil {
 			return nil, err
 		}
@@ -694,15 +696,15 @@ func (a *adapter) UserUpdateTags(uid t.Uid, add, remove, reset []string) ([]stri
 	for _, v := range remove {
 		err := a.QueryOnef(""+
 			"	for g in users"+
-			"	filter g._key == '%s'"+
-			"	let base = is_array(g.tags) ? (remove_values(g.tags, %s)) : ([])"+
-			"	update g with {tags: base} in users"+
-			"	return base", nil, uid.String(), v)
+			`	filter g._key == "%s"`+
+			`	let base = is_array(g.Tags) ? (remove_value(g.Tags, "%s")) : ([])`+
+			"	update g with {Tags: base} in users"+
+			"	return base", &out, uid.String(), v)
 		if err != nil {
 			return nil, err
 		}
 	}
-	return nil, nil
+	return out, nil
 }
 
 // UserGetByCred returns user ID for the given validated credential.
@@ -735,7 +737,8 @@ func (a *adapter) UserUnreadCount(uid t.Uid) (int, error) {
 	for t in topics
 	filter d.User == "%s" && t._key == d.Topic
 	filter t.State != "%d" && (d.DeletedAt == "" || d.DeletedAt == null)
-	collect aggregate seqId = Max(t.SeqId), readSeqId = Min(d.ReadSeqId) 
+	filter contains(d.ModeWant, "R") && contains(d.ModeGiven, "R")
+	collect aggregate seqId = sum(t.SeqId), readSeqId = sum(d.ReadSeqId) 
 	return seqId - readSeqId
 	`
 	var ans int
@@ -918,7 +921,7 @@ func (a *adapter) AuthGetUniqueRecord(unique string) (t.Uid, auth.Level, []byte,
 // AuthGetRecord returns authentication record given user ID and method.
 func (a *adapter) AuthGetRecord(uid t.Uid, scheme string) (string, auth.Level, []byte, time.Time, error) {
 	var record struct {
-		Id      string     `bson:"_key"`
+		Id      string     `json:"_key"`
 		UserId  string     `json:"userid"`
 		AuthLvl auth.Level `json:"authlvl"`
 		Secret  []byte     `json:"secret"`
@@ -927,7 +930,7 @@ func (a *adapter) AuthGetRecord(uid t.Uid, scheme string) (string, auth.Level, [
 	if err := a.QueryOnef(`for d in auth
 	filter d.userid == "%s" && d.scheme == "%s"
 	return d`, &record, uid.String(), scheme); err != nil {
-		return "", 0, nil, time.Time{}, err
+		return "", 0, nil, time.Time{}, t.ErrNotFound
 	}
 	return record.Id, record.AuthLvl, record.Secret, record.Expires, nil
 }
@@ -985,7 +988,7 @@ func (a *adapter) AuthUpdRecord(uid t.Uid, scheme, unique string,
 		Unique string `json:"_key"`
 	}
 	if err := a.QueryOnef(`for d in auth
-	filter d.UserId == "%s" && d.Scheme == %s
+	filter d.UserId == "%s" && d.Scheme == "%s"
 	return d`, &record, uid.String(), scheme); err != nil {
 		return err
 	}
@@ -1017,14 +1020,10 @@ func (a *adapter) undeleteSubscription(sub *t.Subscription) error {
 	_, err := a.collections.subscriptions.UpdateDocument(a.ctx,
 		sub.Id,
 		map[string]interface{}{
-			"DeletedAt": "",
 			"UpdatedAt": sub.UpdatedAt,
 			"CreatedAt": sub.CreatedAt,
 			"ModeGiven": sub.ModeGiven,
 			"ModeWant":  sub.ModeWant,
-			"DelId":     0,
-			"ReadSeqId": 0,
-			"RecvSeqId": 0,
 		})
 	return err
 }
@@ -1039,9 +1038,11 @@ func (a *adapter) TopicCreateP2P(initiator, invited *t.Subscription) error {
 	initiator.Id = initiator.Topic + ":" + initiator.User
 	var err error
 	if ok, err := a.collections.subscriptions.DocumentExists(a.ctx, initiator.Id); ok && err == nil {
-		_, err = a.collections.subscriptions.UpdateDocument(a.ctx, initiator.Id, initiator)
+		if err = a.undeleteSubscription(initiator); err != nil {
+			return err
+		}
 	} else {
-		a.collections.subscriptions.CreateDocument(a.ctx, initiator.Id)
+		_, err = a.collections.subscriptions.CreateDocument(a.ctx, initiator.Id)
 	}
 	if err != nil {
 		return err
@@ -1050,12 +1051,17 @@ func (a *adapter) TopicCreateP2P(initiator, invited *t.Subscription) error {
 	_, err = a.collections.subscriptions.CreateDocument(a.ctx, invited)
 	if err != nil {
 		if !driver.IsConflict(err) {
-			err = a.undeleteSubscription(invited)
+			return err
 		}
-		return err
+		err = a.undeleteSubscription(invited)
+		if err != nil {
+			return err
+		}
 	}
-	//return a.TopicCreate(topic)
-	return nil
+	topic := &t.Topic{ObjHeader: t.ObjHeader{Id: initiator.Topic}}
+	topic.ObjHeader.MergeTimes(&initiator.ObjHeader)
+	topic.TouchedAt = initiator.GetTouchedAt()
+	return a.TopicCreate(topic)
 }
 
 // TopicGet loads a single topic by name, if it exists. If the topic does not exist the call returns (nil, nil)
@@ -1079,6 +1085,9 @@ func (a *adapter) TopicsForUser(uid t.Uid, keepDeleted bool, opts *t.QueryOpt) (
 	limit := 0
 	ims := time.Time{}
 	if opts != nil {
+		if opts.Topic != "" {
+			query = query + "&& d.Topic == \"" + opts.Topic + "\""
+		}
 		// Apply the limit only when the client does not manage the cache (or cold start).
 		// Otherwise have to get all subscriptions and do a manual join with users/topics.
 		if opts.IfModifiedSince == nil {
@@ -1090,13 +1099,12 @@ func (a *adapter) TopicsForUser(uid t.Uid, keepDeleted bool, opts *t.QueryOpt) (
 		} else {
 			ims = *opts.IfModifiedSince
 		}
-		if opts.Topic != "" {
-			query = query + "&& d.Topic == \"" + opts.Topic + "\""
-		}
+	} else {
+		limit = a.maxResults
 	}
 	if !keepDeleted {
 		// Filter out rows with defined deletedat
-		query = query + " && d.DeletedAt != null"
+		query = query + " && d.DeletedAt != \"\""
 	}
 	if limit > 0 {
 		query = query + "\nlimit " + strconv.Itoa(limit) + "\n"
@@ -1155,23 +1163,22 @@ func (a *adapter) TopicsForUser(uid t.Uid, keepDeleted bool, opts *t.QueryOpt) (
 	if len(topq) > 0 {
 		// Fetch grp & p2p topics
 		query = "for d in topics"
-		query = query + "\n filter 1 == 1 "
 		pq2 := make([]string, len(topq))
 		for idx, v := range topq {
 			pq2[idx] = "\"" + v + "\""
 		}
-		query = query + " && POSITION([" + strings.Join(pq2, ",") + "], d._key)"
+		query = query + "\n filter POSITION([" + strings.Join(pq2, ",") + "], d._key)"
 		if !keepDeleted {
 			query = query + " && d.State != \"" + t.StateDeleted.String() + "\""
 		}
 		if !ims.IsZero() {
 			// Use cache timestamp if provided: get newer entries only.
-			query = query + fmt.Sprintf(`&& d.TouchedAt > date_iso8601("%s")`, ims.Format(time.RFC3339))
+			query = query + fmt.Sprintf(`&& d.TouchedAt > date_timestamp("%s")`, ims.Format(time.RFC3339))
 		}
 		query = query + "\n"
 		query = query + ` let out = (d.TouchedAt != "") ? d : unset(d, "TouchedAt")
+		sort d.TouchedAt DESC
 		return out`
-		cur, err = a.QueryManyf(query)
 		if err != nil {
 			return nil, err
 		}
@@ -1204,6 +1211,7 @@ func (a *adapter) TopicsForUser(uid t.Uid, keepDeleted bool, opts *t.QueryOpt) (
 		if !keepDeleted {
 			query = query + " \n filter d.State != " + strconv.Itoa(int(t.StateDeleted))
 		}
+
 		query = query + "\n return d"
 		// Ignoring ims: we need all users to get LastSeen and UserAgent.
 
@@ -1242,15 +1250,14 @@ func (a *adapter) TopicsForUser(uid t.Uid, keepDeleted bool, opts *t.QueryOpt) (
 // UsersForTopic loads users' subscriptions for a given topic. Public & Trusted are loaded.
 func (a *adapter) UsersForTopic(topic string, keepDeleted bool, opts *t.QueryOpt) ([]t.Subscription, error) {
 	tcat := t.GetTopicCat(topic)
-
 	// Fetch topic subscribers
 	// Fetch all subscribed users. The number of users is not large
-	filter := map[string]interface{}{"topic": topic}
+	query := "for d in subscriptions"
+	query = query + fmt.Sprintf(`
+	filter d.Topic == "%s"`, topic)
 	if !keepDeleted && tcat != t.TopicCatP2P {
-		// Filter out rows with DeletedAt being not null.
-		// P2P topics must load all subscriptions otherwise it will be impossible
-		// to swap Public values.
-		filter["deletedat"] = map[string]interface{}{"$exists": false}
+		query = query + `
+		filter !(has(d, "DeletedAt") || d.DeletedAt == "" || d.DeletedAt == null)`
 	}
 
 	limit := a.maxResults
@@ -1258,10 +1265,9 @@ func (a *adapter) UsersForTopic(topic string, keepDeleted bool, opts *t.QueryOpt
 	if opts != nil {
 		// Ignore IfModifiedSince - we must return all entries
 		// Those unmodified will be stripped of Public, Trusted & Private.
-
 		if !opts.User.IsZero() {
 			if tcat != t.TopicCatP2P {
-				filter["user"] = opts.User.String()
+				query = query + fmt.Sprintf(`  filter d.User == "%s"`, opts.User.String())
 			}
 			oneUser = opts.User
 		}
@@ -1269,8 +1275,9 @@ func (a *adapter) UsersForTopic(topic string, keepDeleted bool, opts *t.QueryOpt
 			limit = opts.Limit
 		}
 	}
+	query = query + " return d"
 
-	cur, err := a.QueryManyf(``)
+	cur, err := a.QueryManyf(query)
 	if err != nil {
 		return nil, err
 	}
@@ -1296,7 +1303,10 @@ func (a *adapter) UsersForTopic(topic string, keepDeleted bool, opts *t.QueryOpt
 		subs = make([]t.Subscription, 0, len(usrq))
 
 		// Fetch users by a list of subscriptions
-		cur, err = a.QueryManyf(``)
+		cur, err = a.QueryManyf(`for d in users
+		filter d._key == "%s" && d.State != %d
+		return d
+		`, usrq, t.StateDeleted)
 		if err != nil {
 			return nil, err
 		}
@@ -1458,7 +1468,7 @@ func (a *adapter) TopicDelete(topic string, hard bool) error {
 
 // TopicUpdateOnMessage increments Topic's or User's SeqId value and updates TouchedAt timestamp.
 func (a *adapter) TopicUpdateOnMessage(topic string, msg *t.Message) error {
-	return a.topicUpdate(topic, map[string]interface{}{"seqid": msg.SeqId, "touchedat": msg.CreatedAt})
+	return a.topicUpdate(topic, map[string]interface{}{"SeqId": msg.SeqId, "TouchedAt": msg.CreatedAt})
 }
 
 // TopicUpdate updates topic record.
@@ -1471,7 +1481,7 @@ func (a *adapter) TopicUpdate(topic string, update map[string]interface{}) error
 
 // TopicOwnerChange updates topic's owner
 func (a *adapter) TopicOwnerChange(topic string, newOwner t.Uid) error {
-	return a.topicUpdate(topic, map[string]interface{}{"owner": newOwner.String()})
+	return a.topicUpdate(topic, map[string]interface{}{"Owner": newOwner.String()})
 }
 
 func (a *adapter) topicUpdate(topic string, update map[string]interface{}) error {
@@ -1566,24 +1576,63 @@ func (a *adapter) SubsForTopic(topic string, keepDeleted bool, opts *t.QueryOpt)
 	return subs, err
 }
 
-//TODO: SubsUpdate updates pasrt of a subscription object. Pass nil for fields which don't need to be updated
+//SubsUpdate updates pasrt of a subscription object. Pass nil for fields which don't need to be updated
 func (a *adapter) SubsUpdate(topic string, user t.Uid, update map[string]interface{}) error {
 	// to get round the hardcoded pass of "Private" key
-	//	filter := map[string]interface{}{}
-	//	if !user.IsZero() {
-	//		// Update one topic subscription
-	//		filter["_key"] = topic + ":" + user.String()
-	//	} else {
-	//		// Update all topic subscriptions
-	//		filter["topic"] = topic
-	//	}
+	query := "	for g in subscriptions"
+	if !user.IsZero() {
+		query = query + fmt.Sprintf(`	filter g._key == "%s"`, topic+":"+user.String())
+	} else {
+		query = query + fmt.Sprintf(`	filter g.Topic == "%s"`, topic)
+	}
+	query = query + "	return g"
+	cur, err := a.QueryManyf(query)
+	if err != nil {
+		return err
+	}
+	defer cur.Close()
+	for cur.HasMore() {
+		doc := new(t.Subscription)
+		_, err = cur.ReadDocument(a.ctx, doc)
+		if err != nil {
+			return err
+		}
+		_, err = a.collections.subscriptions.UpdateDocument(a.ctx, doc.Id, update)
+		if err != nil {
+			return err
+		}
+	}
 	return nil
-	//_, err := a.collections.subscriptions.UpdateDocument(a.ctx, filter, update)
-	//return err
 }
 
-// TODO: SubsDelete deletes a single subscription
+//SubsDelete deletes a single subscription
 func (a *adapter) SubsDelete(topic string, user t.Uid) error {
+	var err error
+	if a.useTransactions {
+		tid, err := a.db.BeginTransaction(a.ctx, driver.TransactionCollections{
+			Write: []string{"dellog", "messages"},
+		}, &driver.BeginTransactionOptions{LockTimeout: 10 * time.Second})
+		if err != nil {
+			return err
+		}
+		defer a.db.CommitTransaction(a.ctx, tid, nil)
+	}
+	_, err = a.collections.subscriptions.RemoveDocument(a.ctx, topic+":"+user.String())
+	if err != nil {
+		return err
+	}
+	if err = a.QueryOnef(`for d in dellog
+			filter d.Topic == "%s" && d.DeletedFor == "%s"
+			remove d in dellog
+			`, nil, topic, user.String()); err != nil {
+		return err
+	}
+	if err = a.QueryOnef(`for d in messages
+			filter d.Topic == "%s" && d.DeletedFor == "%s"
+			remove d in messages
+			`, nil, topic, user.String()); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1848,23 +1897,42 @@ func (a *adapter) MessageGetDeleted(topic string, forUser t.Uid, opts *t.QueryOp
 
 // DeviceUpsert creates or updates a device record.
 func (a *adapter) DeviceUpsert(uid t.Uid, dev *t.DeviceDef) error {
+	userId := uid.String()
 	var user t.User
-	err := a.QueryOnef(``, &user)
-	return err
+	q1 := `for d in users
+	filter d._key == "%s" && d.Devices["%s"].DeviceId == "%s"
+	return d`
+	err := a.QueryOnef(q1, &user, userId, dev.DeviceId, dev.DeviceId)
+	if err == nil && user.Id != "" { // current user owns this device
+		// ArrayFilter used to avoid adding another (duplicate) device object. Update that device data
+		query := `for d in users
+		filter d._key == "%s"
+		UPDATE d WITH { Devices: {
+			"%s": {
+				DeviceId: "%s",
+				Platform: "%s",
+				LastSeen: "%s",
+				Lang: "%s"
+			}
+		}} IN users
+		`
+		err = a.QueryOnef(query, nil, userId, dev.DeviceId, dev.DeviceId, dev.Platform, dev.LastSeen.Format(time.RFC3339), dev.Lang)
+		return err
+	} else if err == t.ErrNotFound { // device is free or owned by other user
+		return a.deviceInsert(userId, dev)
+	}
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 // deviceInsert adds device object to user.devices array
 func (a *adapter) deviceInsert(userId string, dev *t.DeviceDef) error {
 	filter := userId
-	_, err := a.collections.users.UpdateDocument(a.ctx, filter,
-		map[string]interface{}{"$push": map[string]interface{}{"devices": dev}})
-
-	if err != nil && strings.Contains(err.Error(), "must be an array") {
-		// field 'devices' is not array. Make it array with 'dev' as its first element
-		_, err = a.collections.users.UpdateDocument(a.ctx, filter,
-			map[string]interface{}{"devices": []interface{}{dev}})
-	}
-
+	_, err := a.collections.users.UpdateDocument(a.ctx, filter, map[string]interface{}{"Devices": map[string]interface{}{
+		dev.DeviceId: dev,
+	}})
 	return err
 }
 
@@ -1886,7 +1954,7 @@ func (a *adapter) DeviceGetAll(uids ...t.Uid) (map[t.Uid][]t.DeviceDef, int, err
 	var uid t.Uid
 	for cur.HasMore() {
 		var row struct {
-			Id      string `bson:"_key"`
+			Id      string `json:"_key"`
 			Devices []t.DeviceDef
 		}
 		if _, err = cur.ReadDocument(a.ctx, &row); err != nil {
@@ -1928,15 +1996,14 @@ func (a *adapter) FileStartUpload(fd *t.FileDef) error {
 
 // FileFinishUpload marks file upload as completed, successfully or otherwise.
 func (a *adapter) FileFinishUpload(fd *t.FileDef, success bool, size int64) (*t.FileDef, error) {
-	now := t.TimeNow()
 	if success {
 		// Mark upload as completed.
 		if _, err := a.collections.fileuploads.UpdateDocument(a.ctx,
 			fd.Id,
 			map[string]interface{}{
-				"updatedat": now,
-				"status":    t.UploadCompleted,
-				"size":      size,
+				"UpdatedAt": t.TimeNow(),
+				"Status":    t.UploadCompleted,
+				"Size":      size,
 			}); err != nil {
 
 			return nil, err
@@ -1952,7 +2019,7 @@ func (a *adapter) FileFinishUpload(fd *t.FileDef, success bool, size int64) (*t.
 		fd.Size = 0
 	}
 
-	fd.UpdatedAt = now
+	fd.UpdatedAt = t.TimeNow()
 
 	return fd, nil
 }

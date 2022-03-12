@@ -651,7 +651,6 @@ func TestUserUpdateTags(t *testing.T) {
 	want := []string{"alice", "tag1", "Alice"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf(mismatchErrorString("Tags", got, want))
-
 	}
 	got, _ = adp.UserUpdateTags(types.ParseUserId("usr"+users[0].Id), nil, removeTags, nil)
 	want = []string{"Alice"}
@@ -813,12 +812,16 @@ func TestSubsUpdate(t *testing.T) {
 	update := map[string]interface{}{
 		"UpdatedAt": now.Add(22 * time.Minute),
 	}
-	err := adp.SubsUpdate(topics[0].Id, types.ParseUserId("usr"+users[0].Id), update)
+	subid := types.ParseUserId("usr" + users[0].Id)
+	err := adp.SubsUpdate(topics[0].Id, subid, update)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var got types.Subscription
-	_, _ = db.subscriptions.ReadDocument(ctx, topics[0].Id+":"+users[0].Id, &got)
+	_, err = db.subscriptions.ReadDocument(ctx, topics[0].Id+":"+subid.String(), &got)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got.UpdatedAt != update["UpdatedAt"] {
 		t.Errorf(mismatchErrorString("UpdatedAt", got.UpdatedAt, update["UpdatedAt"]))
 	}
@@ -855,8 +858,8 @@ func TestDeviceUpsert(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
-	if !reflect.DeepEqual(got.DeviceArray[0], devs[0]) {
-		t.Error(mismatchErrorString("Device", got.DeviceArray[0], devs[0]))
+	if !reflect.DeepEqual(got.Devices[devs[0].DeviceId], devs[0]) {
+		t.Error(mismatchErrorString("Device", got.Devices[devs[0].DeviceId], devs[0]))
 	}
 	// Test update
 	devs[0].Platform = "Web"
@@ -868,8 +871,8 @@ func TestDeviceUpsert(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
-	if got.DeviceArray[0].Platform != "Web" {
-		t.Error("Device not updated.", got.DeviceArray[0])
+	if got.Devices[devs[0].DeviceId].Platform != "Web" {
+		t.Error("Device not updated.", got.Devices[devs[0].DeviceId])
 	}
 	// Test add same device to another user
 	err = adp.DeviceUpsert(types.ParseUserId("usr"+users[1].Id), devs[0])
@@ -880,8 +883,8 @@ func TestDeviceUpsert(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
-	if got.DeviceArray[0].Platform != "Web" {
-		t.Error("Device not updated.", got.DeviceArray[0])
+	if got.Devices[devs[0].DeviceId].Platform != "Web" {
+		t.Error("Device not updated.", got.Devices[devs[0].DeviceId])
 	}
 
 	err = adp.DeviceUpsert(types.ParseUserId("usr"+users[2].Id), devs[1])
@@ -957,8 +960,8 @@ func TestDeviceDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.DeviceArray) != 0 {
-		t.Error("Device not deleted:", got.DeviceArray)
+	if len(got.Devices) != 0 {
+		t.Error("Device not deleted:", got.Devices)
 	}
 
 	err = adp.DeviceDelete(types.ParseUserId("usr"+users[2].Id), "")
@@ -969,8 +972,8 @@ func TestDeviceDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.DeviceArray) != 0 {
-		t.Error("Device not deleted:", got.DeviceArray)
+	if len(got.Devices) != 0 {
+		t.Error("Device not deleted:", got.Devices)
 	}
 }
 
