@@ -262,7 +262,7 @@ func initMessages() {
 		SeqId:   3,
 		Topic:   topics[0].Id,
 		From:    users[0].Id,
-		Content: "msg31",
+		Content: "msg3",
 	})
 	msgs = append(msgs, &types.Message{
 		SeqId:   1,

@@ -1738,7 +1738,6 @@ func (a *adapter) MessageSave(msg *t.Message) error {
 func (a *adapter) MessageGetAll(topic string, forUser t.Uid, opts *t.QueryOpt) ([]t.Message, error) {
 	var limit = a.maxMessageResults
 	var lower, upper int
-	requester := forUser.String()
 	if opts != nil {
 		if opts.Since > 0 {
 			lower = opts.Since
@@ -1751,20 +1750,22 @@ func (a *adapter) MessageGetAll(topic string, forUser t.Uid, opts *t.QueryOpt) (
 			limit = opts.Limit
 		}
 	}
-	filter := map[string]interface{}{
-		"topic":           topic,
-		"delid":           map[string]interface{}{"$exists": false},
-		"deletedfor.user": map[string]interface{}{"$ne": requester},
-	}
-	if upper == 0 {
-		filter["seqid"] = map[string]interface{}{"$gte": lower}
-	} else {
-		filter["seqid"] = map[string]interface{}{"$gte": lower, "$lt": upper}
-	}
-	//findOpts := mdbopts.Find().SetSort(b.D{{"topic", -1}, {"seqid", -1})
-	//findOpts.SetLimit(int64(limit))
+	query := `
+	for d in messages
+	sort d.Topic, d.SeqId desc
+	filter d.Topic == "%s" && (d.DeletedAt == "" || d.DeletedAt == null)
+	filter "%s" not in d.DeletedFor[*].User
+	filter d.SeqId >= ` + strconv.Itoa(lower)
 
-	cur, err := a.QueryManyf(``)
+	if upper != 0 {
+		query = query + " && d.SeqId < " + strconv.Itoa(upper)
+	}
+	if limit > 0 {
+		query = query + "\n limit " + strconv.Itoa(limit)
+	}
+	query = query + "\n return d"
+	//fmt.Printf(query, topic, forUser.String())
+	cur, err := a.QueryManyf(query, topic, forUser.String())
 	if err != nil {
 		return nil, err
 	}
@@ -1813,18 +1814,16 @@ func (a *adapter) MessageDeleteList(topic string, toDel *t.DelMessage) error {
 	}
 
 	// Only some messages are being deleted
-
 	// Start with making a log entry
 	_, err = a.collections.dellog.CreateDocument(a.ctx, toDel)
 	if err != nil {
 		return err
 	}
-
-	filter := map[string]interface{}{
-		"topic": topic,
-		// Skip already hard-deleted messages.
-		"delid": map[string]interface{}{"$exists": false},
-	}
+	//	filter := map[string]interface{}{
+	//		"topic": topic,
+	//		// Skip already hard-deleted messages.
+	//		"delid": map[string]interface{}{"$exists": false},
+	//	}
 	if toDel.DeletedFor == "" {
 		// TODO:
 		//		if err = a.decFileUseCounter(a.ctx, "messages", filter); err != nil {
@@ -1843,7 +1842,7 @@ func (a *adapter) MessageDeleteList(topic string, toDel *t.DelMessage) error {
 		// Soft-deleting: adding DelId to DeletedFor
 
 		// Skip messages already soft-deleted for the current user
-		filter["deletedfor.user"] = map[string]interface{}{"$ne": toDel.DeletedFor}
+		//	filter["Deletedfor.user"] = map[string]interface{}{"$ne": toDel.DeletedFor}
 		//_, err = a.collections.messages.UpdateDocuments(a.ctx, filter,
 		//			map[string]interface{}{"$addToSet": map[string]interface{}{
 		//				"deletedfor": &t.SoftDelete{
