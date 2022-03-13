@@ -26,6 +26,7 @@ import (
 	adapter "github.com/tinode/chat/server/db"
 
 	backend "github.com/tinode/chat/server/db/arango"
+	"github.com/tinode/chat/server/db/arango/extrastore"
 	"github.com/tinode/chat/server/logs"
 	"github.com/tinode/chat/server/store/types"
 
@@ -748,7 +749,7 @@ func TestAuthUpdRecord(t *testing.T) {
 	}
 	// Test if old ID deleted
 	_, err = db.auth.ReadDocument(ctx, rec.Id, &got)
-	if err == nil {
+	if err == nil || !driver.IsNotFound(err) {
 		t.Errorf("Unique not changed. Got error: %v; ID: %v", err, got.Id)
 	}
 	if bytes.Equal(got.Secret, rec.Secret) {
@@ -842,7 +843,10 @@ func TestSubsDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	var got types.Subscription
-	_, _ = db.subscriptions.ReadDocument(ctx, topics[1].Id+":"+users[0].Id, &got)
+	_, err = db.subscriptions.ReadDocument(ctx, topics[1].Id+":"+users[0].Id, &got)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got.DeletedAt == nil {
 		t.Errorf(mismatchErrorString("DeletedAt", got.DeletedAt, nil))
 	}
@@ -899,21 +903,21 @@ func TestMessageAttachments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got map[string]interface{}
+	var got extrastore.FileUpload
 	_, err = db.messages.ReadDocument(ctx, msgs[1].Id, &got)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got["attachments"], fids) {
-		t.Error(mismatchErrorString("Attachments", got["attachments"], fids))
+	if !reflect.DeepEqual(got.Attachments, fids) {
+		t.Error(mismatchErrorString("Attachments", got.Attachments, fids))
 	}
-	var got2 map[string]interface{}
+	var got2 extrastore.FileUpload
 	_, err = db.fileuploads.ReadDocument(ctx, files[0].Id, &got2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got2["usecount"] != 1 {
-		t.Error(mismatchErrorString("UseCount", got2["usecount"], 1))
+	if got2.UseCount != 1 {
+		t.Error(mismatchErrorString("UseCount", got2.UseCount, 1))
 	}
 }
 
@@ -961,7 +965,7 @@ func TestDeviceDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(got.Devices) != 0 {
-		t.Error("Device not deleted:", got.Devices)
+		t.Errorf("Device not deleted: %+v", got.Devices)
 	}
 
 	err = adp.DeviceDelete(types.ParseUserId("usr"+users[2].Id), "")
@@ -973,7 +977,7 @@ func TestDeviceDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(got.Devices) != 0 {
-		t.Error("Device not deleted:", got.Devices)
+		t.Errorf("Device not deleted: %+v", got.Devices)
 	}
 }
 
@@ -1057,7 +1061,7 @@ func TestMessageDeleteList(t *testing.T) {
 
 	var got []types.Message
 	cur, err := db.QueryManyf(`for d in messages
-	d.Topic == %s
+	filter d.Topic == "%s"
 	return d`, toDel.Topic)
 	if err != nil {
 		t.Fatal(err)
@@ -1097,7 +1101,9 @@ func TestMessageDeleteList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cur, err = db.QueryManyf("for d in messages filter d.Topic==%s return d", toDel.Topic)
+
+	got = []types.Message{}
+	cur, err = db.QueryManyf(`for d in messages filter d.Topic=="%s" return d`, toDel.Topic)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1105,7 +1111,6 @@ func TestMessageDeleteList(t *testing.T) {
 		one := &types.Message{}
 		_, err := cur.ReadDocument(context.Background(), one)
 		if err != nil {
-
 			t.Fatal(err)
 		}
 		got = append(got, *one)
@@ -1121,7 +1126,9 @@ func TestMessageDeleteList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cur, err = db.QueryManyf("for d in messages filter d.Topic==%s return d", topics[0].Id)
+
+	got = []types.Message{}
+	cur, err = db.QueryManyf(`for d in messages filter d.Topic=="%s" return d`, topics[0].Id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1144,17 +1151,17 @@ func TestTopicDelete(t *testing.T) {
 		t.Fatal()
 	}
 	got := new(types.Topic)
-	err = db.QueryOnef("for d in topics filter d._key==%s return d", got, topics[1].Id)
+	err = db.QueryOnef(`for d in topics filter d._key=="%s" return d`, got, topics[1].Id)
 	if err != nil {
 		t.Fatal(err)
 	}
 	err = adp.TopicDelete(topics[0].Id, true)
 	if err != nil {
-		t.Fatal()
+		t.Fatal(err)
 	}
 
 	var got2 []types.Topic
-	cur, err := db.QueryManyf("for d in topics filter d._key==%s return d", topics[0].Id)
+	cur, err := db.QueryManyf(`for d in topics filter d._key=="%s" return d`, topics[0].Id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1166,8 +1173,8 @@ func TestTopicDelete(t *testing.T) {
 		}
 		got2 = append(got2, *one)
 	}
-	_, err = db.topics.ReadDocument(ctx, topics[0].Id, got)
-	if err != nil {
+	_, err = db.topics.ReadDocument(ctx, topics[0].Id, got2)
+	if err != nil && !driver.IsNotFound(err) {
 		t.Fatal(err)
 	}
 	if len(got2) != 0 {
@@ -1204,7 +1211,7 @@ func TestUserDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = db.users.ReadDocument(ctx, users[1].Id, &got)
-	if err != nil {
+	if !driver.IsNotFound(err) {
 		t.Error("User hard delete failed", err)
 	}
 }

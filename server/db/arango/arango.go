@@ -258,6 +258,9 @@ func (a *adapter) GetDbVersion() (int, error) {
 		Value int    `json:"value"`
 	}
 	if _, err := a.collections.kvmeta.ReadDocument(a.ctx, "version", &result); err != nil {
+		if driver.IsNotFound(err) {
+			err = errors.New("Database not initialized")
+		}
 		return -1, err
 	}
 	a.version = result.Value
@@ -363,7 +366,7 @@ func (a *adapter) CreateDb(reset bool) error {
 			a.collections.users = coll
 			persistent = append(persistent, "Tags[*]", "DeletedAt")
 			_, _, err = coll.EnsurePersistentIndex(a.ctx,
-				[]string{"deviceids[*]"},
+				[]string{"Devices[*].DeviceId"},
 				&driver.EnsurePersistentIndexOptions{
 					InBackground: true,
 					Unique:       true,
@@ -397,7 +400,7 @@ func (a *adapter) CreateDb(reset bool) error {
 			}
 			persistent = append(persistent, "Topic", "DelId")
 			_, _, err = coll.EnsurePersistentIndex(a.ctx,
-				[]string{"topic", "delid"},
+				[]string{"Topic", "DelId"},
 				&driver.EnsurePersistentIndexOptions{
 					InBackground: true,
 					Name:         "IDX_" + "topic_delid",
@@ -564,11 +567,11 @@ func (a *adapter) UserDelete(uid t.Uid, hard bool) error {
 		}
 		topics = append(topics, res)
 	}
-	topicStrings := make([]string, len(topics))
-	for i, t2 := range topics {
-		topicStrings[i] = t2.Id
-
+	tops := make([]string, len(topics))
+	for idx, v := range topics {
+		tops[idx] = "\"" + v.Id + "\""
 	}
+	tog := strings.Join(tops, ", ")
 	if a.useTransactions {
 		tid, err := a.db.BeginTransaction(a.ctx, driver.TransactionCollections{
 			Write: []string{"dellog", "messages", "subscriptions", "topics"},
@@ -584,37 +587,66 @@ func (a *adapter) UserDelete(uid t.Uid, hard bool) error {
 		// 3. Delete all messages.
 		// 4. Delete subscriptions.
 
-		for _, topic := range topics {
-			if err = a.QueryOnef(`for d in dellog
-			filter d.Topic == "%s"
+		if err = a.QueryOnef(`for d in dellog
+			filter position([%s], d.Topic)
 			remove d in dellog
-			`, nil, topic.Id); err != nil {
-				return err
-			}
-			if err = a.QueryOnef(`for d in subscriptions
-			filter d.Topic == "%s"
-			remove d in subscriptions
-			`, nil, topic.Id); err != nil {
-				return err
-			}
-			if err = a.QueryOnef(`for d in messages
-			filter d.Topic == "%s"
-			remove d in messages
-			`, nil, topic.Id); err != nil {
-				return err
-			}
-			if err = a.QueryOnef(`for d in topics
-			filter d._key == "%s"
-			remove d in topics
-			`, nil, topic.Id); err != nil {
-				return err
-			}
+			`, nil, tog); err != nil {
+			return err
 		}
-		// Select all other topics where the user is a subscriber.
+
+		// Decrement fileuploads UseCounter
+		// First get array of attachments IDs that were used in messages of topics from topicIds
+		// Then decrement the usecount field of these file records
+		err = a.decFileUseCounter(a.ctx, "messages",
+			fmt.Sprintf(`filter position([%s], d.Topic)`, tog))
+		if err != nil {
+			return err
+		}
+
+		// Decrement use counter for topic avatars
+		err = a.decFileUseCounter(a.ctx, "topics",
+			fmt.Sprintf(`filter position([%s], d._key)`, tog))
+		if err != nil {
+			return err
+		}
+		if err = a.QueryOnef(`for d in messages
+			filter position([%s], d.Topic)
+			remove d in messages
+			`, nil, tog); err != nil {
+			return err
+		}
+
+		// Delete all subscriptions.
+		if err = a.QueryOnef(`for d in subscriptions
+			filter position([%s], d.Topic)
+			remove d in subscriptions
+			`, nil, tog); err != nil {
+			return err
+		}
+
+		// Delete all topics
+		if err = a.QueryOnef(`for d in topics
+			filter position([%s], d.Topic)
+			remove d in topics
+			`, nil, tog); err != nil {
+			return err
+		}
+
 		// Delete user's dellog entries.
-
+		if err = a.QueryOnef(`for d in dellog
+			filter d.DeletedFor.User == "%s"
+			remove d in dellog
+			`, nil, uid.String()); err != nil {
+			return err
+		}
 		// Delete user's markings of soft-deleted messages
-
+		if err = a.QueryOnef(`for d in messages
+			filter d.DeletedFor[*].User == "%s"
+			let base = is_array(d.DeletedFor) ? (remove_value(d.DeletedFor, "%s")) : ([])
+			UPDATE d WITH { DeletedFor: base } IN messages
+			`, nil, uid.String(), uid.String()); err != nil {
+			return err
+		}
 		// Delete user's subscriptions in all topics.
 		if err = a.QueryOnef(`for d in subscriptions
 			filter d.User == "%s"
@@ -622,7 +654,6 @@ func (a *adapter) UserDelete(uid t.Uid, hard bool) error {
 			`, nil, uid.String()); err != nil {
 			return err
 		}
-
 		// Delete user's authentication records.
 		if err = a.QueryOnef(`for d in auth
 			filter d.UserId == "%s"
@@ -630,7 +661,6 @@ func (a *adapter) UserDelete(uid t.Uid, hard bool) error {
 			`, nil, uid.String()); err != nil {
 			return err
 		}
-
 		// Delete credentials.
 		if err = a.QueryOnef(`for d in credentials
 			filter d.User == "%s"
@@ -640,7 +670,11 @@ func (a *adapter) UserDelete(uid t.Uid, hard bool) error {
 		}
 
 		// TODO: Delete avatar (decrement use counter).
-
+		err = a.decFileUseCounter(a.ctx, "users",
+			fmt.Sprintf(`filter d._id == "%s"`, uid.String()))
+		if err != nil {
+			return err
+		}
 		// And finally delete the user.
 		if err = a.QueryOnef(`for d in users
 			filter d._key == "%s"
@@ -656,11 +690,40 @@ func (a *adapter) UserDelete(uid t.Uid, hard bool) error {
 			return err
 		}
 
+		now := t.TimeNow()
+		disable := map[string]interface{}{
+			"State":     t.StateDeleted,
+			"UpdatedAt": now,
+			"StateAt":   now,
+		}
 		//TODO: Disable subscriptions for topics where the user is the owner.
-
+		if err = a.QueryOnef(`for d in subscriptions
+			filter position([%s], d.Topic)
+			update d with {
+				State: %d,
+				UpdatedAt: "%s",
+				StateAt: "%s",
+			} in subscriptions
+			`, nil, tog, t.StateDeleted,
+			time.Now().Format(time.RFC3339),
+			time.Now().Format(time.RFC3339),
+		); err != nil {
+			return err
+		}
 		//TODO: Disable topics where the user is the owner.
-
+		for _, v := range topics {
+			if _, err = a.collections.topics.UpdateDocument(a.ctx,
+				v.Id,
+				disable); err != nil {
+				return err
+			}
+		}
 		//TOTO: Finally disable the user.
+		if _, err = a.collections.users.UpdateDocument(a.ctx,
+			uid.String(),
+			disable); err != nil {
+			return err
+		}
 	}
 	return err
 }
@@ -899,7 +962,9 @@ func (a *adapter) CredFail(uid t.Uid, method string) error {
 	query := fmt.Sprintf(`for d in credentials
 	filter d.User == "%s" && d.DeletedAt != null  && d.Method == "%s" && d.Done == false
 	UPDATE d WITH { Retries:d.Retries + 1, UpdatedAt: "%s" } IN credentials
-	`, uid.String(), method, time.Now().Format(time.RFC3339))
+	`, uid.String(), method,
+		time.Now().Format(time.RFC3339),
+	)
 	_, err := a.db.Query(a.ctx, query, nil)
 	return err
 }
@@ -909,26 +974,32 @@ func (a *adapter) CredFail(uid t.Uid, method string) error {
 // Todo: AuthGetUniqueRecord returns authentication record for a given unique value i.e. login.
 func (a *adapter) AuthGetUniqueRecord(unique string) (t.Uid, auth.Level, []byte, time.Time, error) {
 	var record struct {
-		UserId  string     `json:"userid"`
-		AuthLvl auth.Level `json:"authlvl"`
-		Secret  []byte     `json:"secret"`
-		Expires time.Time  `json:"expires"`
+		UserId  string     `json:"UserId"`
+		AuthLvl auth.Level `json:"AuthLvl"`
+		Secret  []byte     `json:"Secret"`
+		Expires time.Time  `json:"Expires"`
 	}
 	_, err := a.collections.auth.ReadDocument(a.ctx, unique, &record)
-	return t.ParseUid(record.UserId), record.AuthLvl, record.Secret, record.Expires, err
+	if driver.IsNotFound(err) {
+		return t.ZeroUid, 0, nil, time.Time{}, nil
+	}
+	if err != nil {
+		return t.ZeroUid, 0, nil, time.Time{}, err
+	}
+	return t.ParseUid(record.UserId), record.AuthLvl, record.Secret, record.Expires, nil
 }
 
 // AuthGetRecord returns authentication record given user ID and method.
 func (a *adapter) AuthGetRecord(uid t.Uid, scheme string) (string, auth.Level, []byte, time.Time, error) {
 	var record struct {
 		Id      string     `json:"_key"`
-		UserId  string     `json:"userid"`
-		AuthLvl auth.Level `json:"authlvl"`
-		Secret  []byte     `json:"secret"`
-		Expires time.Time  `json:"expires"`
+		UserId  string     `json:"UserId"`
+		AuthLvl auth.Level `json:"AuthLvl"`
+		Secret  []byte     `json:"Secret"`
+		Expires time.Time  `json:"Expires"`
 	}
 	if err := a.QueryOnef(`for d in auth
-	filter d.userid == "%s" && d.scheme == "%s"
+	filter d.UserId == "%s" && d.Scheme == "%s"
 	return d`, &record, uid.String(), scheme); err != nil {
 		return "", 0, nil, time.Time{}, t.ErrNotFound
 	}
@@ -939,11 +1010,11 @@ func (a *adapter) AuthGetRecord(uid t.Uid, scheme string) (string, auth.Level, [
 func (a *adapter) AuthAddRecord(uid t.Uid, scheme, unique string, authLvl auth.Level, secret []byte, expires time.Time) error {
 	authRecord := map[string]interface{}{
 		"_key":    unique,
-		"userid":  uid.String(),
-		"scheme":  scheme,
-		"authlvl": authLvl,
-		"secret":  secret,
-		"expires": expires}
+		"UserId":  uid.String(),
+		"Scheme":  scheme,
+		"AuthLvl": authLvl,
+		"Secret":  secret,
+		"Expires": expires}
 	if _, err := a.collections.auth.CreateDocument(a.ctx, authRecord); err != nil {
 		return t.ErrDuplicate
 	}
@@ -953,7 +1024,7 @@ func (a *adapter) AuthAddRecord(uid t.Uid, scheme, unique string, authLvl auth.L
 // AuthDelScheme deletes an existing authentication scheme for the user.
 func (a *adapter) AuthDelScheme(uid t.Uid, scheme string) error {
 	if err := a.QueryOnef(`for d in auth
-	filter d.UserId == "%s" && d.Scheme == %s 
+	filter d.UserId == "%s" && d.Scheme == "%s"
 	remove d._key in auth
 	return d`, nil, uid.String(), scheme); err != nil {
 		return err
@@ -962,13 +1033,15 @@ func (a *adapter) AuthDelScheme(uid t.Uid, scheme string) error {
 }
 
 func (a *adapter) authDelAllRecords(ctx context.Context, uid t.Uid) (int, error) {
+	var res int
 	if err := a.QueryOnef(`for d in auth
 	filter d.UserId == "%s"
 	remove d._key in auth
-	return d`, nil, uid.String()); err != nil {
+	COLLECT WITH COUNT INTO deleted
+	return deleted`, &res, uid.String()); err != nil {
 		return 0, err
 	}
-	return 0, nil
+	return res, nil
 }
 
 // AuthDelAllRecords deletes all records of a given user.
@@ -1008,10 +1081,9 @@ func (a *adapter) AuthUpdRecord(uid t.Uid, scheme, unique string,
 	} else {
 		err = a.AuthAddRecord(uid, scheme, unique, authLvl, secret, expires)
 		if err == nil {
-			a.AuthDelScheme(uid, scheme)
+			err = a.AuthDelScheme(uid, scheme)
 		}
 	}
-
 	return err
 }
 
@@ -1207,7 +1279,7 @@ func (a *adapter) TopicsForUser(uid t.Uid, keepDeleted bool, opts *t.QueryOpt) (
 
 	// Fetch p2p users and join to p2p tables
 	if len(usrq) > 0 {
-		query = "for d in topics"
+		query = "for d in users"
 		if !keepDeleted {
 			query = query + " \n filter d.State != " + strconv.Itoa(int(t.StateDeleted))
 		}
@@ -1257,7 +1329,7 @@ func (a *adapter) UsersForTopic(topic string, keepDeleted bool, opts *t.QueryOpt
 	filter d.Topic == "%s"`, topic)
 	if !keepDeleted && tcat != t.TopicCatP2P {
 		query = query + `
-		filter !(has(d, "DeletedAt") || d.DeletedAt == "" || d.DeletedAt == null)`
+filter d.DeletedAt == "" || d.DeletedAt == null `
 	}
 
 	limit := a.maxResults
@@ -1285,14 +1357,14 @@ func (a *adapter) UsersForTopic(topic string, keepDeleted bool, opts *t.QueryOpt
 	// Fetch subscriptions
 	var subs []t.Subscription
 	join := make(map[string]t.Subscription)
-	usrq := make([]interface{}, 0, 16)
+	usrq := make([]string, 0, 16)
 	for cur.HasMore() {
 		var sub t.Subscription
 		if _, err = cur.ReadDocument(a.ctx, &sub); err != nil {
 			break
 		}
 		join[sub.User] = sub
-		usrq = append(usrq, sub.User)
+		usrq = append(usrq, "id:"+sub.User)
 	}
 	cur.Close()
 	if err != nil {
@@ -1303,14 +1375,15 @@ func (a *adapter) UsersForTopic(topic string, keepDeleted bool, opts *t.QueryOpt
 		subs = make([]t.Subscription, 0, len(usrq))
 
 		// Fetch users by a list of subscriptions
-		cur, err = a.QueryManyf(`for d in users
-		filter d._key == "%s" && d.State != %d
+		query := `for d in users
+		filter contains("id:%s", d._key, false)
+		filter d.State != %d
 		return d
-		`, usrq, t.StateDeleted)
+		`
+		cur, err = a.QueryManyf(query, strings.Join(usrq, ", "), t.StateDeleted)
 		if err != nil {
 			return nil, err
 		}
-
 		for cur.HasMore() {
 			var usr2 t.User
 			if _, err = cur.ReadDocument(a.ctx, &usr2); err != nil {
@@ -1372,17 +1445,20 @@ func (a *adapter) UsersForTopic(topic string, keepDeleted bool, opts *t.QueryOpt
 // OwnTopics loads a slice of topic names where the user is the owner.
 func (a *adapter) OwnTopics(uid t.Uid) ([]string, error) {
 	//filter := map[string]interface{}{"owner": uid.String(), "state": map[string]interface{}{"$ne": t.StateDeleted}
-	cur, err := a.QueryManyf(``)
+	cur, err := a.QueryManyf(`for d in topics
+filter d.Owner == "%s" && d.State != %d
+return d._key
+	`, uid.String(), t.StateDeleted)
 	if err != nil {
 		return nil, err
 	}
 	var names []string
 	for cur.HasMore() {
-		var res map[string]string
+		var res string
 		if _, err = cur.ReadDocument(a.ctx, &res); err != nil {
 			break
 		}
-		names = append(names, res["_key"])
+		names = append(names, res)
 	}
 	cur.Close()
 	return names, err
@@ -1442,28 +1518,48 @@ func (a *adapter) TopicShare(subs []*t.Subscription) error {
 
 // TopicDelete deletes topic, subscription, messages
 func (a *adapter) TopicDelete(topic string, hard bool) error {
-	err := a.subsDelete(a.ctx, map[string]interface{}{"topic": topic}, hard)
-	if err != nil {
-		return err
-	}
-	filter := topic
 	if hard {
-		if err = a.MessageDeleteList(topic, nil); err != nil {
+		if err := a.MessageDeleteList(topic, nil); err != nil {
 			return err
 		}
-		// TODO: file counter
-		//	if err = a.decFileUseCounter(a.ctx, "topics", filter); err != nil {
-		//		return err
-		//	}
-		_, err = a.collections.topics.RemoveDocument(a.ctx, filter)
 	} else {
-		_, err = a.collections.topics.UpdateDocument(a.ctx, filter, map[string]interface{}{
+		if err := a.QueryOnef(`for d in subscriptions
+			filter d.Topic == "%s"
+			UPDATE d WITH { DeletedAt: "%s" } IN subscriptions
+	`, nil, topic, time.Now().Format(time.RFC3339)); err != nil {
+			return err
+		}
+	}
+	if hard {
+		if err := a.MessageDeleteList(topic, nil); err != nil {
+			return err
+		}
+		query := `
+		for d in fileuploads
+		filter d.Topic == "%s"
+		update d with {UpdatedAt: "%s", UseCount: d.UseCount - 1 } in fileuploads`
+		if err := a.QueryOnef(query, nil,
+			topic,
+			time.Now().Format(time.RFC3339),
+		); err != nil {
+			return err
+		}
+		if err := a.QueryOnef(`for d in topics
+			filter d._key == "%s"
+			remove d IN topics`,
+			nil, topic); err != nil {
+			return err
+		}
+	} else {
+		if _, err := a.collections.topics.UpdateDocument(a.ctx, topic, map[string]interface{}{
 			"State":   t.StateDeleted,
 			"StateAt": t.TimeNow(),
-		})
+		}); err != nil {
+			return err
+		}
 	}
 
-	return err
+	return nil
 }
 
 // TopicUpdateOnMessage increments Topic's or User's SeqId value and updates TouchedAt timestamp.
@@ -1506,7 +1602,7 @@ func (a *adapter) SubscriptionGet(topic string, user t.Uid, keepDeleted bool) (*
 	query = query + "\n return d"
 	err := a.QueryOnef(query, sub, filter)
 	if err != nil {
-		if driver.IsNoMoreDocuments(err) {
+		if err == t.ErrNotFound {
 			return nil, nil
 		}
 		return nil, err
@@ -1520,7 +1616,10 @@ func (a *adapter) SubscriptionGet(topic string, user t.Uid, keepDeleted bool) (*
 func (a *adapter) SubsForUser(user t.Uid) ([]t.Subscription, error) {
 	//filter := map[string]interface{}{"user": user.String(), "deletedat": map[string]interface{}{"$exists": false}
 
-	cur, err := a.QueryManyf(``)
+	cur, err := a.QueryManyf(`for d in subscriptions
+filter d.User == "%s" && (d.DeletedAt == "" || d.DeletedAt == null || !has(d, "DeletedAt"))
+return d
+	`, user.String())
 	if err != nil {
 		return nil, err
 	}
@@ -1540,25 +1639,27 @@ func (a *adapter) SubsForUser(user t.Uid) ([]t.Subscription, error) {
 
 // SubsForTopic gets a list of subscriptions to a given topic. Does NOT load Public & Trusted values.
 func (a *adapter) SubsForTopic(topic string, keepDeleted bool, opts *t.QueryOpt) ([]t.Subscription, error) {
+	query := `for d in subscriptions
+filter d.Topic == "%s"
+`
 	filter := map[string]interface{}{"topic": topic}
 	if !keepDeleted {
 		filter["deletedat"] = map[string]interface{}{"$exists": false}
+		query = query + ` filter (d.DeletedAt == "" || d.DeletedAt == null || !has(d, "DeletedAt"))`
 	}
 
 	limit := a.maxResults
 	if opts != nil {
-		// Ignore IfModifiedSince - we must return all entries
-		// Those unmodified will be stripped of Public, Trusted & Private.
-
 		if !opts.User.IsZero() {
-			filter["user"] = opts.User.String()
+			query = query + fmt.Sprintf(`	filter d.User == "%s"`, opts.User.String())
 		}
 		if opts.Limit > 0 && opts.Limit < limit {
-			limit = opts.Limit
+			query = query + fmt.Sprintf("\n	limit %d", opts.Limit)
 		}
 	}
 
-	cur, err := a.QueryManyf(``)
+	query = query + "\n return d"
+	cur, err := a.QueryManyf(query, topic)
 	if err != nil {
 		return nil, err
 	}
@@ -1610,14 +1711,19 @@ func (a *adapter) SubsDelete(topic string, user t.Uid) error {
 	var err error
 	if a.useTransactions {
 		tid, err := a.db.BeginTransaction(a.ctx, driver.TransactionCollections{
-			Write: []string{"dellog", "messages"},
+			Exclusive: []string{"dellog", "messages", "subscriptions"},
 		}, &driver.BeginTransactionOptions{LockTimeout: 10 * time.Second})
 		if err != nil {
 			return err
 		}
 		defer a.db.CommitTransaction(a.ctx, tid, nil)
 	}
-	_, err = a.collections.subscriptions.RemoveDocument(a.ctx, topic+":"+user.String())
+	if err = a.QueryOnef(`for d in subscriptions
+			filter d._key == "%s"
+			UPDATE d WITH { DeletedAt: "%s" } IN subscriptions
+			`, nil, topic+":"+user.String(), time.Now().Format(time.RFC3339)); err != nil {
+		return err
+	}
 	if err != nil {
 		return err
 	}
@@ -1628,33 +1734,43 @@ func (a *adapter) SubsDelete(topic string, user t.Uid) error {
 		return err
 	}
 	if err = a.QueryOnef(`for d in messages
-			filter d.Topic == "%s" && d.DeletedFor == "%s"
-			remove d in messages
-			`, nil, topic, user.String()); err != nil {
+			filter d.Topic == "%s" && position(d.DeletedFor,"%s")
+			let base = is_array(d.DeletedFor) ? (remove_value(d.DeletedFor, "%s")) : ([])
+			update d with {Tags: base} in users
+			UPDATE d WITH { DeletedFor: base } IN messages
+			`, nil, topic, user.String(), user.String()); err != nil {
 		return err
 	}
 	return nil
 }
 
-// TODO:
-// Delete/mark deleted subscriptions.
-func (a *adapter) subsDelete(ctx context.Context, filter map[string]interface{}, hard bool) error {
-	var err error
-	if hard {
-		//	_, err = a.collections.subscriptions.RemoveDocuments(ctx, filter)
-	} else {
-		//now := t.TimeNow()
-		//_, err = a.collections.subscriptions.UpdateDocuments(ctx, filter,
-		//	map[string]interface{}{"updatedat": now, "deletedat": now})
-	}
-	return err
-}
-
-// TODO:
 // Search
 // FindUsers searches for new contacts given a list of tags
 func (a *adapter) FindUsers(uid t.Uid, req [][]string, opt []string) ([]t.Subscription, error) {
-	cur, err := a.QueryManyf("")
+	allReq := t.FlattenDoubleSlice(req)
+	index := make(map[string]struct{})
+	allTags := make([]string, 0, len(req))
+	for _, tag := range append(allReq, opt...) {
+		if _, ok := index[tag]; !ok {
+			allTags = append(allTags, "\""+tag+"\"")
+			index[tag] = struct{}{}
+		}
+	}
+	formatted := strings.Join(allTags, ",")
+	pipeline := fmt.Sprintf(`
+for d in users
+let matches = length(intersection(d.Tags, [%s]))
+sort matches desc
+filter matches > 0
+	`, formatted)
+
+	pipeline = pipeline + `filter d.State != ` + strconv.Itoa(int(t.StateDeleted))
+	if a.maxResults > 0 {
+		pipeline = pipeline + "\nlimit " + strconv.Itoa(a.maxResults)
+	}
+	pipeline = pipeline + `
+	return d`
+	cur, err := a.QueryManyf(pipeline)
 	if err != nil {
 		return nil, err
 	}
@@ -1668,7 +1784,6 @@ func (a *adapter) FindUsers(uid t.Uid, req [][]string, opt []string) ([]t.Subscr
 			return nil, err
 		}
 		if user.Id == uid.String() {
-			// Skip the caller
 			continue
 		}
 		sub.CreatedAt = user.CreatedAt
@@ -1679,19 +1794,43 @@ func (a *adapter) FindUsers(uid t.Uid, req [][]string, opt []string) ([]t.Subscr
 		sub.SetDefaultAccess(user.Access.Auth, user.Access.Anon)
 		tags := make([]string, 0, 1)
 		for _, tag := range user.Tags {
-			tags = append(tags, tag)
+			if _, ok := index[tag]; ok {
+				tags = append(tags, tag)
+			}
 		}
 		sub.Private = tags
 		subs = append(subs, sub)
 	}
-
 	return subs, nil
 }
 
 // TODO:
 // FindTopics searches for group topics given a list of tags
 func (a *adapter) FindTopics(req [][]string, opt []string) ([]t.Subscription, error) {
-	cur, err := a.QueryManyf(``)
+	allReq := t.FlattenDoubleSlice(req)
+	index := make(map[string]struct{})
+	allTags := make([]string, 0, len(req))
+	for _, tag := range append(allReq, opt...) {
+		if _, ok := index[tag]; !ok {
+			allTags = append(allTags, "\""+tag+"\"")
+			index[tag] = struct{}{}
+		}
+	}
+	formatted := strings.Join(allTags, ",")
+	pipeline := fmt.Sprintf(`
+for d in topics
+let matches = length(intersection(d.Tags, [%s]))
+sort matches desc
+filter matches > 0
+	`, formatted)
+
+	pipeline = pipeline + `filter d.State != ` + strconv.Itoa(int(t.StateDeleted))
+	if a.maxResults > 0 {
+		pipeline = pipeline + "\nlimit " + strconv.Itoa(a.maxResults)
+	}
+	pipeline = pipeline + `
+	return d`
+	cur, err := a.QueryManyf(pipeline)
 	if err != nil {
 		return nil, err
 	}
@@ -1785,18 +1924,20 @@ func (a *adapter) MessageGetAll(topic string, forUser t.Uid, opts *t.QueryOpt) (
 
 func (a *adapter) messagesHardDelete(topic string) error {
 	var err error
-
-	// TODO: handle file uploads
-	filter := map[string]interface{}{"topic": topic}
-	//	if _, err = a.collections.dellog.RemoveDocuments(a.ctx, filter); err != nil {
-	//		return err
-	//	}
-	//
-	//	if _, err = a.collections.messages.RemoveDocuments(a.ctx, filter); err != nil {
-	//		return err
-	//	}
-
-	if err = a.decFileUseCounter(a.ctx, "messages", filter); err != nil {
+	if err = a.QueryOnef(`for d in messages
+			filter d.Topic == "%s"
+			remove d in messages
+			`, nil, topic); err != nil {
+		return err
+	}
+	if err = a.QueryOnef(`for d in dellog
+			filter d.Topic == "%s"
+			remove d in dellog
+			`, nil, topic); err != nil {
+		return err
+	}
+	if err = a.decFileUseCounter(a.ctx, "messages",
+		fmt.Sprintf(`filter d.Topic == "%s"`, topic)); err != nil {
 		return err
 	}
 
@@ -1819,38 +1960,50 @@ func (a *adapter) MessageDeleteList(topic string, toDel *t.DelMessage) error {
 	if err != nil {
 		return err
 	}
-	//	filter := map[string]interface{}{
-	//		"topic": topic,
-	//		// Skip already hard-deleted messages.
-	//		"delid": map[string]interface{}{"$exists": false},
-	//	}
+	query := fmt.Sprintf(`for d in messages
+	filter d.Topic == "%s"
+	filter d.DelId == "" || d.DelId == null
+	`, topic)
+	if len(toDel.SeqIdRanges) > 1 || toDel.SeqIdRanges[0].Hi <= toDel.SeqIdRanges[0].Low {
+		query = query + "filter 1 == 2"
+		for _, rng := range toDel.SeqIdRanges {
+			if rng.Hi == 0 {
+				query = query + " || d.SeqId == " + strconv.Itoa(rng.Low)
+			} else {
+				query = query + fmt.Sprintf(" || (d.SeqId >= %d && d.SeqId <= %d)", rng.Low, rng.Hi)
+			}
+		}
+	} else {
+		query = query + fmt.Sprintf("\nfilter d.SeqId >= %d && d.SeqId <= %d", toDel.SeqIdRanges[0].Low, toDel.SeqIdRanges[0].Hi)
+	}
 	if toDel.DeletedFor == "" {
-		// TODO:
-		//		if err = a.decFileUseCounter(a.ctx, "messages", filter); err != nil {
-		//			return err
-		//		}
-		//		// Hard-delete individual messages. Message is not deleted but all fields with content
-		//		// are replaced with nulls.
-		//		_, _, err = a.collections.messages.UpdateDocuments(a.ctx, filter, map[string]interface{}{
-		//			"deletedat":   t.TimeNow(),
-		//			"delid":       toDel.DelId,
-		//			"from":        "",
-		//			"head":        nil,
-		//			"content":     nil,
-		//			"attachments": nil})
+		if err = a.decFileUseCounter(a.ctx, "messages",
+			fmt.Sprintf(`filter d.Topic == "%s"`, topic)); err != nil {
+			return err
+		}
+		// Hard-delete individual messages. Message is not deleted but all fields with content
+		// are replaced with nulls.
+		query = query + fmt.Sprintf(`
+			UPDATE d WITH {
+				DeletedAt: "%s",
+				DelId: %d,
+				From: "",
+				Head: null,
+				Content: null,
+				Attachments:null} in messages options {"keepNull": false}`,
+			time.Now().Format(time.RFC3339), toDel.DelId)
 	} else {
 		// Soft-deleting: adding DelId to DeletedFor
-
-		// Skip messages already soft-deleted for the current user
-		//	filter["Deletedfor.user"] = map[string]interface{}{"$ne": toDel.DeletedFor}
-		//_, err = a.collections.messages.UpdateDocuments(a.ctx, filter,
-		//			map[string]interface{}{"$addToSet": map[string]interface{}{
-		//				"deletedfor": &t.SoftDelete{
-		//					User:  toDel.DeletedFor,
-		//					DelId: toDel.DelId,
-		//				})
+		query = query + fmt.Sprintf(`
+			filter d.DeletedFor[*].User != "%s"
+			let base = is_array(d.DeletedFor) ? (append(d.DeletedFor, {User: "%s", DelId: %d})) : [{User: "%s", DelId: %d}]
+			UPDATE d WITH {DeletedFor: base} in messages`,
+			toDel.DeletedFor,
+			toDel.DeletedFor, toDel.DelId,
+			toDel.DeletedFor, toDel.DelId,
+		)
 	}
-
+	err = a.QueryOnef(query, nil)
 	// If operation has failed, remove dellog record.
 	if err != nil {
 		_, _ = a.collections.dellog.RemoveDocument(a.ctx, toDel.Id)
@@ -1860,7 +2013,7 @@ func (a *adapter) MessageDeleteList(topic string, toDel *t.DelMessage) error {
 
 // MessageGetDeleted returns a list of deleted message Ids.
 func (a *adapter) MessageGetDeleted(topic string, forUser t.Uid, opts *t.QueryOpt) ([]t.DelMessage, error) {
-	var limit = a.maxResults
+	var limit = a.maxMessageResults
 	var lower, upper int
 	if opts != nil {
 		if opts.Since > 0 {
@@ -1869,27 +2022,38 @@ func (a *adapter) MessageGetDeleted(topic string, forUser t.Uid, opts *t.QueryOp
 		if opts.Before > 0 {
 			upper = opts.Before
 		}
+
 		if opts.Limit > 0 && opts.Limit < limit {
 			limit = opts.Limit
 		}
 	}
-	filter := map[string]interface{}{
-		"topic": topic,
+	query := `
+	for d in dellog
+	filter d.Topic == "%s"
+	filter d.DeletedFor == "%s" || d.DeletedFor == ""
+	filter d.DelId >= ` + strconv.Itoa(lower)
+	if upper != 0 {
+		query = query + " && d.DelId < " + strconv.Itoa(upper)
 	}
-	if upper == 0 {
-		filter["delid"] = map[string]interface{}{"$gte": lower}
-	} else {
-		filter["delid"] = map[string]interface{}{"$gte": lower, "$lt": upper}
+	if limit > 0 {
+		query = query + "\n limit " + strconv.Itoa(limit)
 	}
-	cur, err := a.QueryManyf(``)
+	query = query + "\n return d"
+	cur, err := a.QueryManyf(query, topic, forUser.String())
 	if err != nil {
 		return nil, err
 	}
 	defer cur.Close()
+	var msgs []t.DelMessage
+	for cur.HasMore() {
+		var msg t.DelMessage
+		if _, err = cur.ReadDocument(a.ctx, &msg); err != nil {
+			return nil, err
+		}
+		msgs = append(msgs, msg)
+	}
 
-	var dmsgs []t.DelMessage
-
-	return dmsgs, nil
+	return msgs, nil
 }
 
 // Devices (for push notifications).
@@ -1899,11 +2063,22 @@ func (a *adapter) DeviceUpsert(uid t.Uid, dev *t.DeviceDef) error {
 	userId := uid.String()
 	var user t.User
 	q1 := `for d in users
-	filter d._key == "%s" && d.Devices["%s"].DeviceId == "%s"
+	filter d.Devices["%s"].DeviceId == "%s"
 	return d`
-	err := a.QueryOnef(q1, &user, userId, dev.DeviceId, dev.DeviceId)
-	if err == nil && user.Id != "" { // current user owns this device
-		// ArrayFilter used to avoid adding another (duplicate) device object. Update that device data
+	err := a.QueryOnef(q1, &user, dev.DeviceId, dev.DeviceId)
+	if err == nil && user.Id != "" {
+		if user.Id != uid.String() {
+			query := `for d in users
+				filter d.Devices["%s"].DeviceId == "%s"
+				UPDATE d WITH { Devices: {
+					"%s":null
+				}
+			} IN users options {"keepNull": false}`
+			err = a.QueryOnef(query, nil, dev.DeviceId, dev.DeviceId, dev.DeviceId)
+			if err != nil {
+				return err
+			}
+		}
 		query := `for d in users
 		filter d._key == "%s"
 		UPDATE d WITH { Devices: {
@@ -1928,33 +2103,44 @@ func (a *adapter) DeviceUpsert(uid t.Uid, dev *t.DeviceDef) error {
 
 // deviceInsert adds device object to user.devices array
 func (a *adapter) deviceInsert(userId string, dev *t.DeviceDef) error {
-	filter := userId
-	_, err := a.collections.users.UpdateDocument(a.ctx, filter, map[string]interface{}{"Devices": map[string]interface{}{
-		dev.DeviceId: dev,
-	}})
+	query := `for d in users
+		filter d._key == "%s"
+		UPDATE d WITH { Devices: {
+			"%s": {
+				DeviceId: "%s",
+				Platform: "%s",
+				LastSeen: "%s",
+				Lang: "%s"
+			}
+		}} IN users
+		`
+	err := a.QueryOnef(query, nil, userId, dev.DeviceId, dev.DeviceId, dev.Platform, dev.LastSeen.Format(time.RFC3339), dev.Lang)
 	return err
 }
 
 // DeviceGetAll returns all devices for a given set of users
 func (a *adapter) DeviceGetAll(uids ...t.Uid) (map[t.Uid][]t.DeviceDef, int, error) {
-	ids := make([]interface{}, len(uids))
+	ids := make([]string, len(uids))
 	for i, id := range uids {
-		ids[i] = id.String()
+		ids[i] = "\"" + id.String() + "\""
 	}
-
-	cur, err := a.QueryManyf(``)
+	query := `
+		for d in users
+		filter position([%s], d._key)
+		return d
+		`
+	cur, err := a.QueryManyf(query, strings.Join(ids, ", "))
 	if err != nil {
 		return nil, 0, err
 	}
 	defer cur.Close()
-
 	result := make(map[t.Uid][]t.DeviceDef)
 	count := 0
 	var uid t.Uid
 	for cur.HasMore() {
 		var row struct {
 			Id      string `json:"_key"`
-			Devices []t.DeviceDef
+			Devices map[string]t.DeviceDef
 		}
 		if _, err = cur.ReadDocument(a.ctx, &row); err != nil {
 			return nil, 0, err
@@ -1963,8 +2149,11 @@ func (a *adapter) DeviceGetAll(uids ...t.Uid) (map[t.Uid][]t.DeviceDef, int, err
 			if err := uid.UnmarshalText([]byte(row.Id)); err != nil {
 				continue
 			}
-
-			result[uid] = row.Devices
+			vals := make([]t.DeviceDef, 0, len(row.Devices))
+			for _, v := range row.Devices {
+				vals = append(vals, v)
+			}
+			result[uid] = vals
 			count++
 		}
 	}
@@ -1974,15 +2163,24 @@ func (a *adapter) DeviceGetAll(uids ...t.Uid) (map[t.Uid][]t.DeviceDef, int, err
 // DeviceDelete deletes a device record (push token).
 func (a *adapter) DeviceDelete(uid t.Uid, deviceID string) error {
 	var err error
-	filter := uid.String()
-	update := map[string]interface{}{}
+	query := `
+for d in users
+filter d._key == "%s"`
 	if deviceID == "" {
-		update["$set"] = map[string]interface{}{"devices": []interface{}{}}
+		query = query + `
+let base = null %s
+		`
 	} else {
-		update["$pull"] = map[string]interface{}{"devices": map[string]interface{}{"deviceid": deviceID}}
+		query = query + `
+let base = {"%s": null}
+		`
 	}
-	_, err = a.collections.users.UpdateDocument(a.ctx, filter, update)
-	return err
+	query = query + "\n update d with {Devices: base} in users options {\"keepNull\":false}"
+	err = a.QueryOnef(query, nil, uid.String(), deviceID)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 // File upload records. The files are stored outside of the database.
@@ -2038,42 +2236,150 @@ func (a *adapter) FileGet(fid string) (*t.FileDef, error) {
 // unused records with UpdatedAt before olderThan.
 // Returns array of FileDef.Location of deleted filerecords so actual files can be deleted too.
 func (a *adapter) FileDeleteUnused(olderThan time.Time, limit int) ([]string, error) {
-	//filter := map[string]interface{}{
-	//	map[string]interface{}{"usecount": 0},
-	//}
-	//	if !olderThan.IsZero() {
-	//		filter["Updatedat"] = map[string]interface{}{"$lt": olderThan}
-	//	}
-	//	if limit > 0 {
-	//		findOpts.SetLimit(int64(limit))
-	//	}
-
-	cur, err := a.QueryManyf(``)
+	if limit < 1 {
+		limit = 10000
+	}
+	cur, err := a.QueryManyf(`for d in fileuploads
+	filter (d.UseCount == 0) || (d.UseCount == null || d.UseCount == "")
+	filter d.UpdatedAt < "%s"
+	limit %d
+	remove d in fileuploads
+	return d.Location`, olderThan.Format(time.RFC3339), limit)
 	if err != nil {
 		return nil, err
 	}
 	defer cur.Close()
 
-	var locations []string
+	locations := []string{}
 	for cur.HasMore() {
-		var result map[string]string
+		var result string
 		if _, err := cur.ReadDocument(a.ctx, &result); err != nil {
 			return nil, err
 		}
-		locations = append(locations, result["location"])
+		locations = append(locations, result)
 	}
-
-	//_, _, err = a.collections.fileuploads.RemoveDocuments(a.ctx, filter)
 	return locations, err
 }
 
 // TODO: Given a filter query against 'messages' collection, decrement corresponding use counter in 'fileuploads' table.
-func (a *adapter) decFileUseCounter(ctx context.Context, collection string, msgFilter map[string]interface{}) error {
+func (a *adapter) decFileUseCounter(ctx context.Context, collection string, filter string) error {
+	q1 := fmt.Sprintf(`for d in %s
+	filter length(d.Attachments) > 0
+	`, collection)
+	q1 = q1 + "\n" + filter
+	q1 = q1 + "\n return d.Attachments"
+	cur, err := a.QueryManyf(q1)
+	if err != nil {
+		return err
+	}
+	dids := []string{}
+	for cur.HasMore() {
+		var resp []string
+		if _, err := cur.ReadDocument(a.ctx, &resp); err != nil {
+			return err
+		}
+		for _, v := range resp {
+			dids = append(dids, "\""+v+"\"")
+		}
+	}
+	query := `for d in fileuploads
+		filter position([%s], d._key)
+		`
+	query = query + `update d with {UpdatedAt: "%s", UseCount: d.UseCount - 1 } in fileuploads`
+	if err := a.QueryOnef(query, nil,
+		strings.Join(dids, ","),
+		time.Now().Format(time.RFC3339),
+	); err != nil {
+		return err
+	}
+
 	return nil
 }
 
 // TODO: FileLinkAttachments connects given topic or message to the file record IDs from the list.
 func (a *adapter) FileLinkAttachments(topic string, userId, msgId t.Uid, fids []string) error {
+	if len(fids) == 0 || (topic == "" && msgId.IsZero() && userId.IsZero()) {
+		return t.ErrMalformed
+	}
+
+	var linkBy string
+	var linkId string
+	if topic != "" {
+		linkBy = "topic"
+		linkId = topic
+	} else {
+		linkBy = "users"
+		linkId = userId.String()
+	}
+	if a.useTransactions {
+		tid, err := a.db.BeginTransaction(a.ctx, driver.TransactionCollections{
+			Exclusive: []string{"fileuploads", "messages"},
+		}, &driver.BeginTransactionOptions{LockTimeout: 10 * time.Second})
+		if err != nil {
+			return err
+		}
+		defer a.db.CommitTransaction(a.ctx, tid, nil)
+	}
+	dids := make([]string, 0, len(fids))
+	for _, fid := range fids {
+		dids = append(dids, "\""+fid+"\"")
+	}
+	// Unlink earlier uploads on the same topic or user allowing them to be garbage-collected.
+	if len(fids) < 0 {
+		return nil
+	}
+	if msgId.IsZero() {
+		query := `
+		for d in fileuploads
+		filter position([%s], d._key)
+		update d with {UpdatedAt: "%s", UseCount: d.UseCount - 1 } in fileuploads
+		`
+		if err := a.QueryOnef(query, nil,
+			strings.Join(dids, ","),
+			time.Now().Format(time.RFC3339),
+		); err != nil {
+			return err
+		}
+		query = `
+		for d in %s
+		filter d._key == "%s"
+		update d with {UpdatedAt: "%s", Attachments: [%s] } in messages
+		`
+
+		if err := a.QueryOnef(query, nil,
+			linkBy,
+			linkId,
+			time.Now().Format(time.RFC3339), strings.Join(dids, ","),
+		); err != nil {
+			return err
+		}
+		return nil
+	} else {
+		query := `
+		for d in messages
+		filter d._key == "%s"
+		update d with {UpdatedAt: "%s", Attachments: [%s]} in messages
+		`
+		if err := a.QueryOnef(query, nil,
+			msgId.String(),
+			time.Now().Format(time.RFC3339), strings.Join(dids, ","),
+		); err != nil {
+			return err
+		}
+	}
+	query := `
+		for d in fileuploads
+		for file_id in [%s]
+		upsert {_key: file_id}
+		insert {_key: file_id, UpdatedAt: "%s", UseCount: 1 }
+		update {UpdatedAt: "%s", UseCount: 1 } in fileuploads
+		`
+	if err := a.QueryOnef(query, nil,
+		strings.Join(dids, ", "),
+		time.Now().Format(time.RFC3339),
+	); err != nil {
+		return err
+	}
 	return nil
 }
 

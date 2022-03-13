@@ -118,7 +118,6 @@ func (storeObj) Open(workerId int, jsonconf json.RawMessage) error {
 	if err := openAdapter(workerId, jsonconf); err != nil {
 		return err
 	}
-
 	return adp.CheckDbVersion()
 }
 

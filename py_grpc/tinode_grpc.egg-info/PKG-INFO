@@ -1,6 +1,6 @@
 Metadata-Version: 2.1
 Name: tinode-grpc
-Version: 0.18.2
+Version: 0.18.2.post5
 Summary: Tinode gRPC bindings.
 Home-page: https://github.com/tinode/chat
 Author: Tinode Authors

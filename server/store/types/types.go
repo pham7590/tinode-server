@@ -885,7 +885,7 @@ type Subscription struct {
 	User string
 	// Topic subscribed to
 	Topic     string
-	DeletedAt *time.Time `bson:",omitempty" json:",omitempty"`
+	DeletedAt *time.Time `bson:",omitempty" json:"DeletedAt,omitempty"`
 
 	// Values persisted through subscription soft-deletion
 
@@ -1145,8 +1145,8 @@ func (t *Topic) GetAccess(uid Uid) (mode AccessMode) {
 
 // SoftDelete is a single DB record of soft-deletetion.
 type SoftDelete struct {
-	User  string
-	DelId int
+	User  string `json:"User"`
+	DelId int    `json:"DelId"`
 }
 
 // MessageHeaders is needed to attach Scan() to.
@@ -1300,13 +1300,13 @@ func GetTopicCat(name string) TopicCat {
 // push notifications.
 type DeviceDef struct {
 	// Device registration ID
-	DeviceId string
+	DeviceId string `json:"DeviceId"`
 	// Device platform (iOS, Android, Web)
-	Platform string
+	Platform string `json:"Platform"`
 	// Last logged in
-	LastSeen time.Time
+	LastSeen time.Time `json:"LastSeen"`
 	// Device language, ISO code
-	Lang string
+	Lang string `json:"Lang"`
 }
 
 // Media handling constants

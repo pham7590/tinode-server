@@ -14,10 +14,10 @@ import (
 
 	"github.com/tinode/chat/server/auth"
 
+	_ "github.com/tinode/chat/server/db/arango"
 	_ "github.com/tinode/chat/server/db/mongodb"
 	_ "github.com/tinode/chat/server/db/mysql"
 	_ "github.com/tinode/chat/server/db/rethinkdb"
-	_ "github.com/tinode/chat/server/db/arango"
 	"github.com/tinode/chat/server/store"
 	"github.com/tinode/chat/server/store/types"
 	jcr "github.com/tinode/jsonco"
