@@ -1,3 +1,17 @@
+# tinode arango adapter
+
+adapter for [arango](https://github.com/arangodb/arangodb)
+
+located in ./server/db/arango
+
+build instructions are the same, except use 'arango' tag when compiling.
+
+using this internally, feel free to put in an issue. will get to them!
+
+some changes are made ./server/store/types to help for JSON encoding/decoding for the driver. They should not break rethinkdb, but i am not 100%
+
+
+
 # Tinode Instant Messaging Server
 
 <img src="docs/logo.svg" align="left" width=128 height=128> Instant messaging server. Backend in pure [Go](http://golang.org) (license [GPL 3.0](http://www.gnu.org/licenses/gpl-3.0.en.html)), client-side binding in Java, Javascript, and Swift, as well as [gRPC](https://grpc.io/) client support for C++, C#, Go, Java, Node, PHP, Python, Ruby, Objective-C, etc. (license [Apache 2.0](http://www.apache.org/licenses/LICENSE-2.0)). Wire transport is JSON over websocket (long polling is also available) for custom bindings, or [protobuf](https://developers.google.com/protocol-buffers/) with gRPC. Persistent storage is any one of MySQL, MongoDB or [RethinkDB](http://rethinkdb.com/). Other databases can be supported by writing custom adapters.
