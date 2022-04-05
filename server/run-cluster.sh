@@ -9,7 +9,7 @@ HTTP_BASE_PORT=6060
 # Port where the first node will listen for gRPC intra-cluster connections.
 GRPC_BASE_PORT=16060
 
-USAGE="Usage: $0 [ --config <path_to_tinode.conf> ] {start|stop}"
+USAGE="Usage: $0 [ --config /Users/quypham/go/src/github.com/tinode/chat/server/tinode.conf ] {start|stop}"
 
 if [ "$#" -lt "1" ]; then
   echo $USAGE

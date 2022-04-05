@@ -263,7 +263,7 @@ func main() {
 
 	logFlags := flag.String("log_flags", "stdFlags",
 		"Comma-separated list of log flags (as defined in https://golang.org/pkg/log/#pkg-constants without the L prefix)")
-	configfile := flag.String("config", "tinode.conf", "Path to config file.")
+	configfile := flag.String("config", "/Users/quypham/go/src/github.com/tinode/chat/server/tinode.conf", "Path to config file.")
 	// Path to static content.
 	staticPath := flag.String("static_data", defaultStaticPath, "File path to directory with static files to be served.")
 	listenOn := flag.String("listen", "", "Override address and port to listen on for HTTP(S) clients.")

@@ -4,6 +4,7 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -80,7 +81,8 @@ func openAdapter(workerId int, jsonconf json.RawMessage) error {
 	if config.Adapters != nil {
 		adapterConfig = config.Adapters[adp.GetName()]
 	}
-
+	log.Println("Adapters", availableAdapters)
+	//log.Println("last line", adp.Open(adapterConfig))
 	return adp.Open(adapterConfig)
 }
 

@@ -16,7 +16,7 @@ else
 	rm -f working.config
 
 	# The 'alldbs' is not a valid adapter name.
-	if [ "$TARGET_DB" = "alldbs" ] ; then
+	if [ "$TARGET_DB" = "arangodb" ] ; then
 		TARGET_DB=
 	fi
 

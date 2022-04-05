@@ -191,7 +191,7 @@ func main() {
 	scheme := flag.String("scheme", "basic", "User's authentication scheme to update")
 	authLevel := flag.String("auth", "", "change user's authentication level (one of ROOT, AUTH, ANON)")
 	datafile := flag.String("data", "", "name of file with sample data to load")
-	conffile := flag.String("config", "./tinode.conf", "config of the database connection")
+	conffile := flag.String("config", "/Users/quypham/go/src/github.com/tinode/chat/tinode-db/tinode.conf", "config of the database connection")
 
 	flag.Parse()
 
